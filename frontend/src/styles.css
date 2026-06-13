@@ -1,0 +1,274 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f6f7fb;
+  color: #172033;
+}
+
+.app-shell {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+}
+
+.sidebar {
+  width: 400px;
+  height: 100vh;
+  overflow-y: auto;
+  padding: 22px;
+  background: #ffffff;
+  border-right: 1px solid #d9deea;
+}
+
+.sidebar h1 {
+  margin: 0;
+  font-size: 28px;
+  letter-spacing: -0.04em;
+}
+
+.subtitle {
+  margin: 4px 0 20px;
+  color: #667085;
+}
+
+.upload-box {
+  display: block;
+  width: 100%;
+  padding: 14px 16px;
+  text-align: center;
+  background: #172033;
+  color: #ffffff;
+  border-radius: 12px;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.upload-box input {
+  display: none;
+}
+
+.status {
+  margin: 16px 0;
+  padding: 12px;
+  background: #f3f5f9;
+  border: 1px solid #e3e7ef;
+  border-radius: 10px;
+  color: #344054;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.info-card,
+.detail-card,
+.focus-card,
+.cluster-card {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid #e3e7ef;
+  border-radius: 12px;
+  background: #fbfcff;
+}
+
+.info-card code {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  color: #475467;
+  word-break: break-all;
+}
+
+.stats {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.stats span {
+  padding: 4px 8px;
+  background: #edf2ff;
+  color: #344054;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.field-label {
+  display: block;
+  margin: 18px 0 8px;
+  color: #344054;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.select {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #cfd6e4;
+  border-radius: 10px;
+  background: white;
+}
+
+.button-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.secondary-button {
+  width: 100%;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid #cfd6e4;
+  border-radius: 10px;
+  background: #ffffff;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.secondary-button:hover {
+  background: #f8fafc;
+}
+
+.detail-card h2,
+.cluster-card h2 {
+  margin: 0 0 10px;
+  font-size: 21px;
+}
+
+.detail-card h3,
+.cluster-card h3 {
+  margin: 18px 0 8px;
+  font-size: 15px;
+  color: #344054;
+}
+
+.detail-row {
+  font-size: 15px;
+  margin: 4px 0;
+}
+
+.column-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.column-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px;
+  background: white;
+  border: 1px solid #e3e7ef;
+  border-radius: 8px;
+}
+
+.column-item span {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.column-item small {
+  color: #667085;
+}
+
+.fk-item {
+  padding: 7px 8px;
+  margin-bottom: 6px;
+  background: #fff8ed;
+  border: 1px solid #ffe3b8;
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.muted {
+  color: #667085;
+  font-size: 14px;
+}
+
+.focus-card {
+  background: #f0f9ff;
+  border-color: #bae6fd;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.cluster-card {
+  background: #fff7ed;
+  border-color: #fed7aa;
+}
+
+.cluster-card h2 {
+  color: #7c2d12;
+}
+
+.hidden-list {
+  margin-top: 8px;
+  color: #475467;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.summary-source {
+  margin-top: 10px;
+  display: inline-block;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #ffedd5;
+  color: #9a3412;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.graph-area {
+  flex: 1;
+  height: 100vh;
+  background-color: #f8fafc;
+  background-image: radial-gradient(#cbd5e1 1px, transparent 1px);
+  background-size: 18px 18px;
+}
+
+.empty-state {
+  height: 100%;
+  display: grid;
+  place-content: center;
+  text-align: center;
+  color: #667085;
+}
+
+.empty-state h2 {
+  color: #172033;
+}/* Cytoscape UI tweaks */
+.graph-area {
+  background-size: 20px 20px;
+}
+
+.cluster-card h2,
+.detail-card h2 {
+  line-height: 1.25;
+}
+/* More visible graph labels and arrow emphasis are mainly set in Cytoscape stylesheet inside main.jsx. */
+.graph-area {
+  background-image: radial-gradient(#b6c2d2 1.15px, transparent 1.15px);
+}
+
+.status,
+.detail-row,
+.fk-item,
+.column-item span,
+.column-item small,
+.hidden-list {
+  font-size: 15px;
+}
+
+
+.secondary-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background: #f1f5f9;
+}

@@ -1,0 +1,20 @@
+{
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "vite": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "cytoscape": "latest",
+    "react-cytoscapejs": "latest",
+    "cytoscape-dagre": "latest",
+    "dagre": "latest"
+  },
+  "devDependencies": {
+    "typescript": "latest"
+  }
+}
