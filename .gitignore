@@ -1,0 +1,8 @@
+.env
+uploaded_dbs/
+__pycache__/
+.venv/
+node_modules/
+dist/
+env/
+venv.sh
