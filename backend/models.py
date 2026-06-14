@@ -70,7 +70,7 @@ class GraphEdge(BaseModel):
     id: str
     source: str
     target: str
-    edge_type: Literal["foreign_key", "summary_edge"] = "foreign_key"
+    edge_type: Literal["foreign_key", "summary_edge", "metaedge"] = "foreign_key"
     from_column: Optional[str] = None
     to_column: Optional[str] = None
     label: str
@@ -159,19 +159,13 @@ class QuerySummaryStats(BaseModel):
     budget_respected: bool = True
     node_reduction_ratio: float = 0.0
     edge_reduction_ratio: float = 0.0
-    ip_objective_value: float = 0.0
-    candidate_node_count: int = 0
-    evaluated_assignment_count: int = 0
-    feasible_assignment_count: int = 0
-    query_pair_distance_sum: float = 0.0
-    query_pair_similarity_sum: float = 0.0
 
 
 class QuerySummaryMethodSpec(BaseModel):
     graph_level: Literal["schema"] = "schema"
     edge_weighting: str = "paper-exact MI column-level path distance: wt(R,S)=min sum D(Ci,Cj), D=1-I/H"
-    visible_graph_selection: str = "paper-style 0/1 bounded summary graph optimization with mandatory query nodes and node budget"
-    hidden_compression: str = "post-IP hierarchical compression of non-visible tables into nearest-anchor summary nodes"
+    visible_graph_selection: str = "paper original IP-style summary graph: select query nodes, budget nodes, and order-preserving metaedges over query shortest-path union"
+    hidden_compression: str = "project extension: non-selected tables are assigned to nearest visible anchors and collapsed into expandable summary nodes"
     prompt_stage_ready: bool = True
 
 

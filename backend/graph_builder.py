@@ -1,4 +1,5 @@
 from collections import Counter, defaultdict, deque
+import itertools
 import math
 import sqlite3
 from pathlib import Path
@@ -1720,302 +1721,245 @@ def _build_query_summary_edges(
 
 
 
-def _query_pairs(query_tables: List[str]) -> List[Tuple[str, str]]:
-    return [
-        (query_tables[i], query_tables[j])
-        for i in range(len(query_tables))
-        for j in range(i + 1, len(query_tables))
-    ]
 
-
-def _visible_edge_strength(edge: GraphEdge) -> float:
-    """Convert paper distance-like edge weight into relationship strength."""
-    if edge.weight is None:
-        return max(float(edge.score or 0.0), 1e-6)
-    return 1.0 / (1.0 + max(float(edge.weight), 0.0))
-
-
-def _summary_subset_score(
-    visible_ids: Set[str],
+def _query_shortest_path_union(
     query_tables: List[str],
     graph: SchemaGraphResponse,
-) -> Tuple[float, List[QueryPathItem], bool, float, float, int]:
-    """Evaluate one 0/1 summary-graph assignment.
+) -> Tuple[Set[str], List[QueryPathItem], Dict[Tuple[str, str], List[str]]]:
+    """Return P, the union of shortest paths among query table pairs.
 
-    This is the solver-side objective for the paper-style bounded summary graph.
-    It treats x_u=1 exactly for nodes in ``visible_ids`` and evaluates whether
-    the induced subgraph connects every query-table pair. Query-pair relevance is
-    measured by the best weighted path inside the selected nodes.
+    This is the preprocessing stage used by the original Summary Graphs paper:
+    the IP is solved on the union of query shortest paths rather than on the
+    whole schema graph.
     """
-    visible_edges = [
-        edge for edge in graph.edges
-        if edge.source in visible_ids and edge.target in visible_ids
-    ]
-    visible_node_ids = set(visible_ids)
-    node_map = {node.id: node for node in graph.nodes}
-    pairs = _query_pairs(query_tables)
+    table_ids = {node.id for node in graph.nodes}
+    path_union: Set[str] = set(query_tables)
+    query_paths: List[QueryPathItem] = []
+    path_by_pair: Dict[Tuple[str, str], List[str]] = {}
 
-    path_items: List[QueryPathItem] = []
-    total_pair_distance = 0.0
-    total_pair_similarity = 0.0
-    connected = True
-
-    for source, target in pairs:
-        path, distance = _shortest_weighted_path(source, target, visible_edges, visible_node_ids)
-        if not path or math.isinf(distance):
-            connected = False
-            break
-        path_edges = _path_edge_items(path, graph)
-        avg_score = sum(edge.score for edge in path_edges) / len(path_edges) if path_edges else 0.0
-        path_items.append(
-            QueryPathItem(
-                source=source,
-                target=target,
-                path=path,
-                path_edges=path_edges,
-                total_weight=round(distance, 4),
-                average_edge_score=round(avg_score, 4),
-                edge_count=max(len(path) - 1, 0),
-            )
-        )
-        total_pair_distance += distance
-        total_pair_similarity += 1.0 / (1.0 + max(distance, 0.0))
-
-    if not connected:
-        return -1e18, [], False, math.inf, 0.0, len(visible_edges)
-
-    edge_relevance = sum(_visible_edge_strength(edge) for edge in visible_edges)
-    node_relevance = sum(node_map[node_id].importance_score for node_id in visible_ids)
-
-    # Paper spirit: preserve informative query paths in a bounded graph.  The
-    # dominant term maximizes low-distance query connectivity; smaller terms
-    # reward informative selected relationships and important context tables.
-    objective = (
-        100.0 * total_pair_similarity
-        + 3.0 * edge_relevance
-        + 1.0 * node_relevance
-        - 0.05 * len(visible_ids)
-    )
-    return objective, path_items, True, total_pair_distance, total_pair_similarity, len(visible_edges)
-
-
-def _generate_candidate_nodes_for_summary_ip(
-    graph: SchemaGraphResponse,
-    query_tables: List[str],
-    node_budget: int,
-    max_candidates: int = 24,
-    paths_per_pair: int = 8,
-) -> Tuple[List[str], List[str]]:
-    """Generate the finite candidate universe for the 0/1 IP.
-
-    The original optimization is NP-hard.  To keep the prototype deterministic
-    and dependency-free, we solve the exact binary program on a candidate universe
-    made of query tables, top weighted paths between query tables, and important
-    neighboring context nodes.
-    """
-    node_map = {node.id: node for node in graph.nodes}
-    table_ids = set(node_map)
-    candidates: Set[str] = set(query_tables)
-    notes: List[str] = []
-
-    for source, target in _query_pairs(query_tables):
-        candidate_paths = _k_shortest_weighted_simple_paths(
-            source,
-            target,
-            graph.edges,
-            table_ids,
-            k=paths_per_pair,
-            max_hops=min(max(len(table_ids), 2), 8),
-        )
-        for path, _distance in candidate_paths:
-            candidates.update(path)
-
-    # Add one-hop context around query/path nodes, ranked by edge strength and
-    # table importance.  These are the optional nodes the IP may select if budget
-    # permits.
-    context_scores: Dict[str, float] = defaultdict(float)
-    for edge in graph.edges:
-        if edge.source in candidates and edge.target not in candidates:
-            context_scores[edge.target] = max(
-                context_scores[edge.target],
-                0.7 * _visible_edge_strength(edge) + 0.3 * node_map[edge.target].importance_score,
-            )
-        if edge.target in candidates and edge.source not in candidates:
-            context_scores[edge.source] = max(
-                context_scores[edge.source],
-                0.7 * _visible_edge_strength(edge) + 0.3 * node_map[edge.source].importance_score,
-            )
-
-    for node_id, _score in sorted(context_scores.items(), key=lambda item: (-item[1], item[0])):
-        if len(candidates) >= max_candidates:
-            break
-        candidates.add(node_id)
-
-    if len(candidates) > max_candidates:
-        # Keep all query tables first, then the highest-importance candidates.
-        non_query_candidates = [node for node in candidates if node not in query_tables]
-        ranked = sorted(
-            non_query_candidates,
-            key=lambda node_id: (-node_map[node_id].importance_score, node_id),
-        )
-        keep_slots = max(0, max_candidates - len(query_tables))
-        candidates = set(query_tables) | set(ranked[:keep_slots])
-        notes.append(
-            f"Candidate universe truncated to {max_candidates} nodes for exact enumeration."
-        )
-
-    ordered = sorted(candidates, key=lambda node_id: (node_id not in query_tables, -node_map[node_id].importance_score, node_id))
-    return ordered, notes
-
-
-def _solve_paper_summary_graph_ip(
-    graph: SchemaGraphResponse,
-    query_tables: List[str],
-    node_budget: int,
-) -> Dict[str, Any]:
-    """Solve the paper-style bounded summary graph as a 0/1 IP.
-
-    Binary variable x_u indicates whether table u is explicitly shown.  The
-    solver enumerates feasible x assignments over a candidate universe, which is
-    equivalent to solving the finite 0/1 model exactly for that universe and does
-    not require an external MILP solver.
-    """
-    node_map = {node.id: node for node in graph.nodes}
-    query_set = set(query_tables)
-    node_budget = max(node_budget, len(query_tables))
-
-    candidates, notes = _generate_candidate_nodes_for_summary_ip(
-        graph,
-        query_tables,
-        node_budget,
-    )
-    candidate_set = set(candidates)
-    optional = [node for node in candidates if node not in query_set]
-    max_optional = max(0, node_budget - len(query_set))
-
-    best_objective = -1e18
-    best_visible: Set[str] = set(query_set)
-    best_paths: List[QueryPathItem] = []
-    best_pair_distance = math.inf
-    best_pair_similarity = 0.0
-    feasible_count = 0
-    evaluated_count = 0
-
-    # Enumerate every x assignment satisfying x_q=1 and sum x_u <= B.
-    # For small/medium schemas this is exact and stable; for large schemas the
-    # candidate universe is bounded above by max_candidates.
-    from itertools import combinations
-    for size in range(0, max_optional + 1):
-        for chosen in combinations(optional, size):
-            visible_ids = set(query_set) | set(chosen)
-            evaluated_count += 1
-            objective, paths, connected, pair_distance, pair_similarity, _edge_count = _summary_subset_score(
-                visible_ids,
-                query_tables,
-                graph,
-            )
-            if not connected:
-                continue
-            feasible_count += 1
-            tie_break = (
-                -pair_distance,
-                sum(node_map[node].importance_score for node in visible_ids),
-                -len(visible_ids),
-            )
-            current_tie = (
-                -best_pair_distance,
-                sum(node_map[node].importance_score for node in best_visible),
-                -len(best_visible),
-            )
-            if objective > best_objective + 1e-12 or (abs(objective - best_objective) <= 1e-12 and tie_break > current_tie):
-                best_objective = objective
-                best_visible = visible_ids
-                best_paths = paths
-                best_pair_distance = pair_distance
-                best_pair_similarity = pair_similarity
-
-    if feasible_count == 0:
-        notes.append("No feasible budgeted connected query summary was found; falling back to weighted shortest-path union.")
-        visible_ids = set(query_tables)
-        fallback_paths: List[QueryPathItem] = []
-        table_ids = set(node_map)
-        for source, target in _query_pairs(query_tables):
+    for i, source in enumerate(query_tables):
+        for target in query_tables[i + 1:]:
             path, total_weight = _shortest_weighted_path(source, target, graph.edges, table_ids)
-            if path:
-                visible_ids.update(path)
-                path_edges = _path_edge_items(path, graph)
-                avg_score = sum(edge.score for edge in path_edges) / len(path_edges) if path_edges else 0.0
-                fallback_paths.append(QueryPathItem(
+            if not path:
+                continue
+            path_union.update(path)
+            path_by_pair[(source, target)] = path
+            path_edges = _path_edge_items(path, graph)
+            average_score = (
+                sum(edge.score for edge in path_edges) / len(path_edges)
+                if path_edges
+                else 0.0
+            )
+            query_paths.append(
+                QueryPathItem(
                     source=source,
                     target=target,
                     path=path,
                     path_edges=path_edges,
                     total_weight=round(total_weight, 4),
-                    average_edge_score=round(avg_score, 4),
-                    edge_count=max(len(path)-1, 0),
-                ))
-        best_visible = visible_ids
-        best_paths = fallback_paths
-        best_objective = 0.0
-        best_pair_distance = sum(path.total_weight for path in fallback_paths)
-        best_pair_similarity = sum(1.0 / (1.0 + max(path.total_weight, 0.0)) for path in fallback_paths)
+                    average_edge_score=round(average_score, 4),
+                    edge_count=max(len(path) - 1, 0),
+                )
+            )
 
-    visible_edges = [edge for edge in graph.edges if edge.source in best_visible and edge.target in best_visible]
-    bridge_ids = best_visible - query_set
-
-    return {
-        "visible_ids": best_visible,
-        "bridge_ids": bridge_ids,
-        "paths": best_paths,
-        "objective_value": best_objective,
-        "candidate_node_count": len(candidates),
-        "evaluated_assignment_count": evaluated_count,
-        "feasible_assignment_count": feasible_count,
-        "query_pair_distance_sum": best_pair_distance,
-        "query_pair_similarity_sum": best_pair_similarity,
-        "selected_visible_edge_count": len(visible_edges),
-        "notes": notes,
-    }
+    return path_union, query_paths, path_by_pair
 
 
-def _k_shortest_weighted_simple_paths(
-    source: str,
-    target: str,
-    edges: List[GraphEdge],
-    table_ids: Set[str],
-    k: int = 8,
-    max_hops: int = 8,
-) -> List[Tuple[List[str], float]]:
-    """Return up to k low-cost simple paths using uniform-cost expansion."""
-    adjacency: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
-    for edge in edges:
-        weight = max(float(edge.weight or 1.0), 1e-6)
-        adjacency[edge.source].append((edge.target, weight))
-        adjacency[edge.target].append((edge.source, weight))
+def _path_prefix_distances(path: List[str], graph: SchemaGraphResponse) -> Dict[Tuple[str, str], float]:
+    """Distance wt(u,v) for metaedges whose endpoints are on the same path."""
+    lookup = _edge_lookup_by_pair(graph.edges)
+    prefix = [0.0]
+    for source, target in zip(path, path[1:]):
+        edge = lookup.get(_edge_key(source, target))
+        prefix.append(prefix[-1] + (float(edge.weight) if edge else 1.0))
 
-    import heapq
-    heap: List[Tuple[float, List[str]]] = [(0.0, [source])]
-    results: List[Tuple[List[str], float]] = []
-    seen_paths: Set[Tuple[str, ...]] = set()
+    distances: Dict[Tuple[str, str], float] = {}
+    for i, source in enumerate(path):
+        for j in range(i + 1, len(path)):
+            target = path[j]
+            distances[(source, target)] = max(0.0, prefix[j] - prefix[i])
+            distances[(target, source)] = max(0.0, prefix[j] - prefix[i])
+    return distances
 
-    while heap and len(results) < k:
-        cost, path = heapq.heappop(heap)
-        current = path[-1]
-        key = tuple(path)
-        if key in seen_paths:
+
+def _paper_summary_edges_for_selected_nodes(
+    selected_nodes: Set[str],
+    path_by_pair: Dict[Tuple[str, str], List[str]],
+    graph: SchemaGraphResponse,
+) -> Tuple[List[GraphEdge], float]:
+    """Construct order-preserving metaedges for a fixed selected node set.
+
+    For each query-pair shortest path, we keep the selected nodes that appear
+    on that path and connect consecutive selected nodes with one metaedge.  This
+    preserves the order of the original shortest path and keeps the query-pair
+    distance equal to the original shortest distance because the metaedge weight
+    is the sum of original edge weights along the compressed segment.
+    """
+    metaedge_weights: Dict[Tuple[str, str], float] = {}
+    metaedge_segments: Dict[Tuple[str, str], List[str]] = {}
+
+    for _pair, path in path_by_pair.items():
+        if len(path) < 2:
             continue
-        seen_paths.add(key)
-        if current == target:
-            results.append((path, cost))
+        path_distances = _path_prefix_distances(path, graph)
+        selected_on_path = [node for node in path if node in selected_nodes]
+        if len(selected_on_path) < 2:
             continue
-        if len(path) - 1 >= max_hops:
-            continue
-        for neighbor, edge_weight in sorted(adjacency.get(current, []), key=lambda item: (item[1], item[0])):
-            if neighbor in path or neighbor not in table_ids:
+        for source, target in zip(selected_on_path, selected_on_path[1:]):
+            key = _edge_key(source, target)
+            # Recover original segment between endpoints for explanation.
+            i = path.index(source)
+            j = path.index(target)
+            if i > j:
+                i, j = j, i
+            segment = path[i:j + 1]
+            weight = path_distances.get((source, target), math.inf)
+            current = metaedge_weights.get(key)
+            if current is None or weight < current:
+                metaedge_weights[key] = weight
+                metaedge_segments[key] = segment
+
+    edges: List[GraphEdge] = []
+    total_weight = 0.0
+    for index, ((source, target), weight) in enumerate(
+        sorted(metaedge_weights.items(), key=lambda item: (item[0][0], item[0][1])),
+        start=1,
+    ):
+        segment = metaedge_segments[(source, target)]
+        hidden_tables = [node for node in segment[1:-1] if node not in {source, target}]
+        score = 1.0 / (1.0 + max(weight, 0.0))
+        edge_id = f"metaedge__{source}__to__{target}__{index}"
+        if len(segment) == 2:
+            # It is still represented as a metaedge so the output exactly
+            # follows the paper's summary graph layer.
+            label = f"metaedge wt={weight:.2f}"
+        else:
+            label = f"metaedge over {len(segment) - 1} hop(s)"
+        edges.append(
+            GraphEdge(
+                id=edge_id,
+                source=source,
+                target=target,
+                edge_type="metaedge",
+                label=label,
+                hidden_edge_count=max(len(segment) - 1, 1),
+                hidden_edges=[" → ".join(segment)],
+                score=round(score, 4),
+                weight=round(weight, 6),
+                score_breakdown={
+                    "paper_metaedge_weight": round(weight, 6),
+                    "paper_metaedge_path": " → ".join(segment),
+                    "compressed_intermediate_table_count": float(len(hidden_tables)),
+                    "compressed_intermediate_tables": hidden_tables,
+                    "paper_role": "order-preserving metaedge over query shortest path",
+                },
+            )
+        )
+        total_weight += weight
+
+    return edges, total_weight
+
+
+def _paper_original_summary_selection(
+    query_tables: List[str],
+    graph: SchemaGraphResponse,
+    node_budget: int,
+    max_exact_candidates: int = 18,
+) -> Tuple[Set[str], List[GraphEdge], List[QueryPathItem], Dict[str, Any]]:
+    """Select the original paper-style summary graph.
+
+    The paper formulates this as an IP over nodes y_u and metaedges x_uv on P,
+    the union of shortest paths between query tables.  To avoid adding a solver
+    dependency, this implementation solves the same selection problem by exact
+    enumeration when the candidate set is small enough.  For larger P, it uses a
+    deterministic bounded enumeration over the most important candidates.
+
+    We interpret the UI `node_budget` as the total visible table budget.  The
+    paper's B is therefore `node_budget - |Q|` extra budget nodes.
+    """
+    query_set = set(query_tables)
+    path_union, query_paths, path_by_pair = _query_shortest_path_union(query_tables, graph)
+    node_map = {node.id: node for node in graph.nodes}
+
+    if len(query_tables) == 1:
+        return query_set, [], query_paths, {
+            "paper_candidate_node_count": len(query_set),
+            "paper_path_union_node_count": len(query_set),
+            "paper_extra_budget": max(0, node_budget - len(query_set)),
+            "paper_summary_objective_weight": 0.0,
+            "paper_solver_mode": "single_query_table_no_metaedges",
+            "paper_selected_budget_nodes": [],
+        }
+
+    extra_budget = max(0, node_budget - len(query_set))
+    candidates = sorted(path_union - query_set)
+    solver_mode = "exact_enumeration"
+
+    # If P is large, retain the most important/path-central candidates for a
+    # bounded exact search.  This is the only approximation in this stage.
+    if len(candidates) > max_exact_candidates:
+        occurrence = Counter()
+        for path in path_by_pair.values():
+            for node in path:
+                if node not in query_set:
+                    occurrence[node] += 1
+        candidates = sorted(
+            candidates,
+            key=lambda node: (
+                -occurrence[node],
+                -node_map.get(node, GraphNode(id=node, label=node)).importance_score,
+                node,
+            ),
+        )[:max_exact_candidates]
+        solver_mode = "bounded_exact_enumeration_candidate_pruned"
+
+    best_selected: Set[str] = set(query_set)
+    best_edges: List[GraphEdge] = []
+    best_weight = math.inf
+    best_budget_nodes: List[str] = []
+
+    max_r = min(extra_budget, len(candidates))
+    for r in range(max_r + 1):
+        for subset in itertools.combinations(candidates, r):
+            selected = query_set | set(subset)
+            metaedges, objective_weight = _paper_summary_edges_for_selected_nodes(selected, path_by_pair, graph)
+            if not metaedges and len(query_tables) > 1:
                 continue
-            heapq.heappush(heap, (cost + edge_weight, path + [neighbor]))
+            # Tie-break: lower objective, then fewer selected budget nodes, then
+            # higher total importance, then stable lexical order.
+            total_importance = sum(node_map[node].importance_score for node in selected if node in node_map)
+            best_total_importance = sum(node_map[node].importance_score for node in best_selected if node in node_map)
+            tie = (
+                objective_weight,
+                len(subset),
+                -total_importance,
+                tuple(sorted(subset)),
+            )
+            best_tie = (
+                best_weight,
+                len(best_budget_nodes),
+                -best_total_importance,
+                tuple(sorted(best_budget_nodes)),
+            )
+            if tie < best_tie:
+                best_selected = selected
+                best_edges = metaedges
+                best_weight = objective_weight
+                best_budget_nodes = list(subset)
 
-    return results
+    if math.isinf(best_weight):
+        best_weight = 0.0
+
+    diagnostics = {
+        "paper_candidate_node_count": len(candidates),
+        "paper_path_union_node_count": len(path_union),
+        "paper_extra_budget": extra_budget,
+        "paper_summary_objective_weight": round(best_weight, 6),
+        "paper_solver_mode": solver_mode,
+        "paper_selected_budget_nodes": sorted(best_selected - query_set),
+        "paper_metaedge_count": len(best_edges),
+    }
+    return best_selected, best_edges, query_paths, diagnostics
 
 
 def build_query_summary_graph(
@@ -2027,18 +1971,20 @@ def build_query_summary_graph(
     max_query_tables: int = 8,
     db_path: Optional[Path] = None,
 ) -> QuerySummaryGraphResponse:
-    """Generate the paper-style query-set summary graph.
+    """Generate the query-aware summary graph using the original paper stage.
 
-    Stage 1 is now the explicit bounded summary graph optimization inspired by
-    *Summary Graphs for Relational Database Schemas*.  We formulate x_u as a
-    binary decision variable indicating whether table u is visible.  Query nodes
-    are mandatory, the total visible table count is bounded by node_budget, and
-    the objective rewards informative query-to-query paths and informative
-    visible schema edges under the paper edge weights.
+    Stage 1 now follows the original Summary Graphs formulation more closely:
+      1. compute P, the union of weighted shortest paths between query tables;
+      2. select query nodes plus at most B budget nodes from P;
+      3. connect selected nodes with order-preserving metaedges;
+      4. minimize the total metaedge weight.
 
-    Stage 2 is our extension: every non-visible table is compressed into a
-    summary node attached to the nearest visible anchor, so no schema region is
-    lost from the UI.
+    In the paper this is solved as an IP.  Here we solve the same discrete
+    selection exactly by enumeration for small P, and use bounded enumeration
+    when P is large so the prototype does not require an external IP solver.
+
+    Stage 2 is our project extension: every table not selected by the original
+    summary graph stage is collapsed into nearest-anchor summary nodes.
     """
     graph = build_schema_graph(database_id, tables, db_path=db_path)
     node_map = {node.id: node for node in graph.nodes}
@@ -2061,19 +2007,20 @@ def build_query_summary_graph(
     node_budget = max(requested_budget, len(cleaned_query_tables))
     query_set = set(cleaned_query_tables)
 
-    ip_solution = _solve_paper_summary_graph_ip(
-        graph=graph,
+    selected_ids, metaedges, paths, paper_diagnostics = _paper_original_summary_selection(
         query_tables=cleaned_query_tables,
+        graph=graph,
         node_budget=node_budget,
     )
 
-    visible_ids: Set[str] = set(ip_solution["visible_ids"])
-    bridge_ids: Set[str] = set(ip_solution["bridge_ids"])
-    paths: List[QueryPathItem] = list(ip_solution["paths"])
-
-    # No post-IP neighbor expansion here: the paper summary graph itself is the
-    # bounded selected graph.  Non-query visible nodes are bridge/budget nodes.
+    # In the original paper, selected non-query tables are the budget nodes.
+    bridge_ids = selected_ids - query_set
     context_ids: Set[str] = set()
+
+    # Optional context is now deliberately disabled for the paper-exact stage.
+    # It can be added later as a separate extension, but the visible graph
+    # returned here should correspond to query nodes + budget nodes only.
+    visible_ids: Set[str] = set(selected_ids)
     budget_respected = len(visible_ids) <= node_budget
     hidden_ids = table_ids - visible_ids
 
@@ -2087,7 +2034,11 @@ def build_query_summary_graph(
         nodes.append(node)
 
     summary_nodes, cluster_map, _anchor_by_cluster = _build_anchor_summary_nodes(hidden_ids, visible_ids, graph)
-    edges = _build_query_summary_edges(visible_ids, cluster_map, graph)
+
+    # The original paper summary graph contains metaedges, not necessarily the
+    # original FK edges.  Our extension adds compressed summary boundary edges.
+    compressed_boundary_edges = _build_compressed_edges(visible_ids, cluster_map, [], graph)
+    edges = metaedges + compressed_boundary_edges
     all_nodes = nodes + summary_nodes
 
     original_node_count = graph.node_count
@@ -2097,31 +2048,14 @@ def build_query_summary_graph(
     edge_reduction = 0.0 if original_edge_count == 0 else 1.0 - (len(edges) / original_edge_count)
 
     method_notes = [
-        "Query nodes are mandatory binary variables with x_q = 1.",
-        "The paper-style bounded summary graph is solved as a 0/1 integer program over a candidate universe.",
-        "The constraint Σ x_u ≤ B enforces the visible table-node budget.",
-        "The objective rewards low-weight query-pair paths, informative visible edges, and high-importance visible tables.",
-        "The implementation uses exact enumeration over the candidate IP universe instead of an external MILP dependency.",
-        "Every non-visible table is compressed into a summary node as our hierarchical UI extension.",
-    ] + list(ip_solution.get("notes", []))
-
-    stats = QuerySummaryStats(
-        original_node_count=original_node_count,
-        original_edge_count=original_edge_count,
-        query_node_count=len(query_set),
-        bridge_node_count=len(bridge_ids),
-        context_node_count=len(context_ids),
-        visible_table_count=len(visible_ids),
-        summary_node_count=len(summary_nodes),
-        hidden_table_count=len(hidden_ids),
-        compressed_edge_count=compressed_edge_count,
-        budget_requested=requested_budget,
-        budget_respected=budget_respected,
-        node_reduction_ratio=round(node_reduction, 4),
-        edge_reduction_ratio=round(edge_reduction, 4),
-    )
-    # Extra fields are allowed by Pydantic in serialization only if modeled, so
-    # these are also added to the response top-level via method_spec/breakdown.
+        "Original paper stage: compute weighted shortest paths between every query-table pair and take their union P.",
+        "Original paper stage: choose query nodes plus budget nodes from P and connect them with order-preserving metaedges.",
+        "The optimization objective minimizes the total metaedge weight; lower weight means a more informative schema connection.",
+        "The UI node budget is interpreted as |Q|+B, where B is the paper's extra budget-node limit.",
+        "This prototype solves the paper IP by exact enumeration on small P; when P is large, it prunes candidate budget nodes and then enumerates exactly over the bounded candidate set.",
+        "Project extension: every non-selected table is assigned to the nearest selected visible anchor and represented by an expandable summary node.",
+        "Project extension: compressed summary edges are shown in addition to paper metaedges so users know where hidden schema regions attach.",
+    ]
 
     return QuerySummaryGraphResponse(
         database_id=database_id,
@@ -2139,18 +2073,32 @@ def build_query_summary_graph(
         nodes=all_nodes,
         edges=edges,
         paths=paths,
-        stats=stats.model_copy(update={
-            "ip_objective_value": round(float(ip_solution["objective_value"]), 4),
-            "candidate_node_count": int(ip_solution["candidate_node_count"]),
-            "evaluated_assignment_count": int(ip_solution["evaluated_assignment_count"]),
-            "feasible_assignment_count": int(ip_solution["feasible_assignment_count"]),
-            "query_pair_distance_sum": round(float(ip_solution["query_pair_distance_sum"]), 4) if not math.isinf(float(ip_solution["query_pair_distance_sum"])) else 0.0,
-            "query_pair_similarity_sum": round(float(ip_solution["query_pair_similarity_sum"]), 4),
-        }),
+        stats=QuerySummaryStats(
+            original_node_count=original_node_count,
+            original_edge_count=original_edge_count,
+            query_node_count=len(query_set),
+            bridge_node_count=len(bridge_ids),
+            context_node_count=len(context_ids),
+            visible_table_count=len(visible_ids),
+            summary_node_count=len(summary_nodes),
+            hidden_table_count=len(hidden_ids),
+            compressed_edge_count=compressed_edge_count,
+            budget_requested=requested_budget,
+            budget_respected=budget_respected,
+            node_reduction_ratio=round(node_reduction, 4),
+            edge_reduction_ratio=round(edge_reduction, 4),
+        ),
         method_spec=QuerySummaryMethodSpec(
             edge_weighting="paper-exact MI column-level path distance: wt(R,S)=min sum D(Ci,Cj), D=1-I/H",
-            visible_graph_selection="paper-style 0/1 bounded summary graph optimization with mandatory query nodes and node budget",
-            hidden_compression="post-IP hierarchical compression of non-visible tables into nearest-anchor summary nodes",
+            visible_graph_selection="original Summary Graphs IP-style stage: query nodes + budget nodes + order-preserving metaedges over query shortest-path union",
+            hidden_compression="project extension: non-selected tables are assigned to nearest visible anchors and collapsed into expandable summary nodes",
         ),
-        method_notes=method_notes,
+        method_notes=method_notes + [
+            f"paper_solver_mode={paper_diagnostics.get('paper_solver_mode')}",
+            f"paper_path_union_node_count={paper_diagnostics.get('paper_path_union_node_count')}",
+            f"paper_candidate_node_count={paper_diagnostics.get('paper_candidate_node_count')}",
+            f"paper_extra_budget={paper_diagnostics.get('paper_extra_budget')}",
+            f"paper_summary_objective_weight={paper_diagnostics.get('paper_summary_objective_weight')}",
+            f"paper_selected_budget_nodes={', '.join(paper_diagnostics.get('paper_selected_budget_nodes', []))}",
+        ],
     )

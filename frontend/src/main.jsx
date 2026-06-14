@@ -119,6 +119,18 @@ const cyStylesheet = [
     }
   },
   {
+    selector: 'edge[edge_type = "metaedge"]',
+    style: {
+      width: 'mapData(score, 0, 1, 2.0, 5.2)',
+      'line-style': 'solid',
+      'line-color': '#2563eb',
+      'target-arrow-color': '#2563eb',
+      'arrow-scale': 1.7,
+      color: '#1e3a8a',
+      'font-weight': 800
+    }
+  },
+  {
     selector: 'edge:selected',
     style: {
       width: 3.4,
@@ -137,6 +149,7 @@ function EdgeMetrics({ edge }) {
     <div className="edge-metrics">
       <small>
         score {Number(edge?.score ?? 0).toFixed(2)} · weight {Number(edge?.weight ?? 0).toFixed(2)}
+        {edge?.edge_type === 'metaedge' ? ' · paper metaedge' : ''}
       </small>
       {hasProfile ? (
         <div className="edge-metric-grid">
@@ -197,13 +210,16 @@ function graphToElements(nodesInput, edgesInput) {
       id: edge.id,
       source: edge.source,
       target: edge.target,
-      label: edge.edge_type === 'summary_edge'
+      label: edge.edge_type === 'summary_edge' || edge.edge_type === 'metaedge'
         ? edge.label
         : `${edge.from_column} → ${edge.to_column}`,
       displayLabel: edge.edge_type === 'summary_edge'
         ? `${edge.label}
 score ${Number(edge.score ?? 0).toFixed(2)}`
-        : `${edge.from_column} → ${edge.to_column}`
+        : edge.edge_type === 'metaedge'
+          ? `metaedge
+wt ${Number(edge.weight ?? 0).toFixed(2)}`
+          : `${edge.from_column} → ${edge.to_column}`
     }
   }));
 
@@ -787,13 +803,16 @@ function App() {
               id: edge.id,
               source: edge.source,
               target: edge.target,
-              label: edge.edge_type === 'summary_edge'
+              label: edge.edge_type === 'summary_edge' || edge.edge_type === 'metaedge'
                 ? edge.label
                 : `${edge.from_column} → ${edge.to_column}`,
               displayLabel: edge.edge_type === 'summary_edge'
                 ? `${edge.label}
 score ${Number(edge.score ?? 0).toFixed(2)}`
-                : `${edge.from_column} → ${edge.to_column}`
+                : edge.edge_type === 'metaedge'
+                  ? `metaedge
+wt ${Number(edge.weight ?? 0).toFixed(2)}`
+                  : `${edge.from_column} → ${edge.to_column}`
             }
           }));
 
@@ -1136,19 +1155,13 @@ score ${Number(edge.score ?? 0).toFixed(2)}`
             <div>Summary nodes: {querySummaryInfo.summary_node_count}</div>
             <div>Compressed hidden tables: {querySummaryInfo.hidden_node_count}</div>
             <div>Compressed edges: {querySummaryInfo.stats?.compressed_edge_count ?? 0}</div>
-            <div>Budget respected: {querySummaryInfo.stats?.budget_respected === false ? 'No, fallback preserved connectivity first' : 'Yes'}</div>
-            <div>IP objective: {Number(querySummaryInfo.stats?.ip_objective_value ?? 0).toFixed(2)}</div>
-            <div>Candidate nodes: {querySummaryInfo.stats?.candidate_node_count ?? 0}</div>
-            <div>Assignments evaluated: {querySummaryInfo.stats?.evaluated_assignment_count ?? 0}</div>
-            <div>Feasible assignments: {querySummaryInfo.stats?.feasible_assignment_count ?? 0}</div>
-            <div>Query-pair distance sum: {Number(querySummaryInfo.stats?.query_pair_distance_sum ?? 0).toFixed(2)}</div>
+            <div>Budget respected: {querySummaryInfo.stats?.budget_respected === false ? 'No, connectivity preserved first' : 'Yes'}</div>
             <div>Node reduction: {(Number(querySummaryInfo.stats?.node_reduction_ratio ?? 0) * 100).toFixed(1)}%</div>
             <div>Edge reduction: {(Number(querySummaryInfo.stats?.edge_reduction_ratio ?? 0) * 100).toFixed(1)}%</div>
 
             {querySummaryInfo.method_spec && (
               <div className="method-box">
                 <strong>Method</strong>
-                <div>{querySummaryInfo.method_spec.edge_weighting}</div>
                 <div>{querySummaryInfo.method_spec.visible_graph_selection}</div>
                 <div>{querySummaryInfo.method_spec.hidden_compression}</div>
               </div>
