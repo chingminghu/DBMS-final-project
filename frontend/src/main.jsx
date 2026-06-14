@@ -15,7 +15,7 @@ const cyStylesheet = [
     style: {
       shape: 'ellipse',
       width: 'mapData(importance_score, 0, 1, 230, 345)',
-      height: 'mapData(importance_score, 0, 1, 125, 185)', 
+      height: 'mapData(importance_score, 0, 1, 125, 185)',
       'background-color': '#ffffff',
       'border-width': 'mapData(importance_score, 0, 1, 2, 5)',
       'border-color': '#64748b',
@@ -827,6 +827,10 @@ wt ${Number(edge.weight ?? 0).toFixed(2)}`
 
   const handleCyReady = useCallback((cy) => {
     cyRef.current = cy;
+
+	cy.off('tap', 'node');
+	cy.off('mouseover', 'edge');
+	cy.off('mouseout', 'edge');
 
     cy.on('tap', 'node', (event) => {
       const node = event.target;
