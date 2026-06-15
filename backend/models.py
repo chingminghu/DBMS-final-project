@@ -52,7 +52,7 @@ class DatabaseListResponse(BaseModel):
 class GraphNode(BaseModel):
     id: str
     label: str
-    node_type: Literal["table", "focus", "summary", "query", "bridge"] = "table"
+    node_type: Literal["table", "focus", "summary", "query", "bridge", "context"] = "table"
     column_count: int = 0
     primary_keys: List[str] = []
     foreign_key_count: int = 0
@@ -62,7 +62,7 @@ class GraphNode(BaseModel):
     tables: Optional[List[str]] = None
     description: Optional[str] = None
     importance_score: float = 0.0
-    score_breakdown: Dict[str, float] = {}
+    score_breakdown: Dict[str, Any] = {}
     representative_table: Optional[str] = None
 
 
@@ -268,6 +268,13 @@ class PreQueryProcessingResponse(BaseModel):
     top_importance_tables: List[TableImportanceItem]
     edge_weight_summary: EdgeWeightSummary
     clusters: List[SchemaCluster]
+    # Expose the same clustering diagnostics as /clusters/initial so the
+    # Pre-query Processing UI does not show fallback zeros.
+    clustering_method: str = "paper_greedy_weighted_modularity"
+    modularity_score: float = 0.0
+    total_edge_strength: float = 0.0
+    merge_count: int = 0
+    merge_history: List[Dict[str, Any]] = []
     method_notes: List[str] = []
 
 class ClusterSummaryResponse(BaseModel):

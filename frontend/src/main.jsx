@@ -15,7 +15,7 @@ const cyStylesheet = [
     style: {
       shape: 'ellipse',
       width: 'mapData(importance_score, 0, 1, 230, 345)',
-      height: 'mapData(importance_score, 0, 1, 125, 185)',
+      height: 'mapData(importance_score, 0, 1, 125, 185)', 
       'background-color': '#ffffff',
       'border-width': 'mapData(importance_score, 0, 1, 2, 5)',
       'border-color': '#64748b',
@@ -63,6 +63,8 @@ const cyStylesheet = [
       color: '#1e3a8a'
     }
   },
+
+
   {
     selector: 'node[node_type = "summary"]',
     style: {
@@ -89,6 +91,33 @@ const cyStylesheet = [
     }
   },
   {
+    selector: 'node.newly-expanded',
+    style: {
+      // The visible green dot is now rendered as a tiny independent marker node.
+      // Keep a soft glow on the expanded node as a secondary cue.
+      'shadow-blur': 14,
+      'shadow-color': '#22c55e',
+      'shadow-opacity': 0.18,
+      'shadow-offset-x': 0,
+      'shadow-offset-y': 0
+    }
+  },
+  {
+    selector: 'node[node_type = "new_marker"]',
+    style: {
+      shape: 'ellipse',
+      width: 24,
+      height: 24,
+      'background-color': '#22c55e',
+      'border-width': 4,
+      'border-color': '#ffffff',
+      label: '',
+      'overlay-opacity': 0,
+      'events': 'no',
+      'z-index': 9999
+    }
+  },
+  {
     selector: 'edge',
     style: {
       width: 'mapData(score, 0, 1, 1.6, 5)',
@@ -96,7 +125,7 @@ const cyStylesheet = [
       'target-arrow-color': '#94a3b8',
       'target-arrow-shape': 'triangle',
       'curve-style': 'bezier',
-      label: 'data(displayLabel)',
+      label: '',
       'font-size': 13,
       color: '#334155',
       'text-background-color': '#ffffff',
@@ -131,12 +160,41 @@ const cyStylesheet = [
     }
   },
   {
-    selector: 'edge:selected',
+    selector: 'edge.compressed-metaedge',
+    style: {
+      width: 'mapData(score, 0, 1, 2.4, 5.8)',
+      'line-style': 'dotted',
+      'line-color': '#7c3aed',
+      'target-arrow-color': '#7c3aed',
+      'target-arrow-shape': 'vee',
+      'arrow-scale': 1.9,
+      color: '#4c1d95',
+      'font-weight': 900
+    }
+  },
+  {
+    selector: 'edge:selected, edge.edge-hover',
     style: {
       width: 3.4,
       'line-color': '#2563eb',
       'target-arrow-color': '#2563eb',
-      'arrow-scale': 1.8
+      'arrow-scale': 1.8,
+      label: 'data(displayLabel)',
+      'text-background-color': '#ffffff',
+      'text-background-opacity': 0.96,
+      'text-background-padding': 4,
+      'font-size': 13,
+      'font-weight': 800
+    }
+  },
+  {
+    selector: 'edge.compressed-metaedge:selected, edge.compressed-metaedge.edge-hover',
+    style: {
+      'line-color': '#7c3aed',
+      'target-arrow-color': '#7c3aed',
+      'target-arrow-shape': 'vee',
+      label: 'data(displayLabel)',
+      color: '#4c1d95'
     }
   }
 ];
@@ -190,7 +248,7 @@ const layoutOptions = {
 function graphToElements(nodesInput, edgesInput) {
   const nodes = nodesInput.map((node) => {
     const displayLabel = node.node_type === 'summary'
-      ? `${node.label}\n${node.table_count ?? 0} tables collapsed`
+      ? `${node.label}\n${node.table_count ?? 0} tables\nClick to expand`
       : node.label;
 
     return {
@@ -200,34 +258,47 @@ function graphToElements(nodesInput, edgesInput) {
         label: node.label,
         displayLabel
       },
-      classes: node.node_type === 'focus' ? 'focus-node' : (node.node_type === 'query' ? 'query-node' : '')
+      classes: [
+        node.node_type === 'focus' ? 'focus-node' : '',
+        node.node_type === 'query' ? 'query-node' : '',
+        node.is_newly_expanded ? 'newly-expanded' : ''
+      ].filter(Boolean).join(' ')
     };
   });
 
-  const edges = edgesInput.map((edge) => ({
-    data: {
-      ...edge,
-      id: edge.id,
-      source: edge.source,
-      target: edge.target,
-      label: edge.edge_type === 'summary_edge' || edge.edge_type === 'metaedge'
-        ? edge.label
-        : `${edge.from_column} → ${edge.to_column}`,
-      displayLabel: edge.edge_type === 'summary_edge'
-        ? `${edge.label}
+  const edges = edgesInput.map((edge) => {
+    const isCompressedMetaedge = edge.edge_type === 'metaedge'
+      && String(edge.label || '').toLowerCase().includes('over');
+
+    return {
+      data: {
+        ...edge,
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        label: edge.edge_type === 'summary_edge' || edge.edge_type === 'metaedge'
+          ? edge.label
+          : `${edge.from_column} → ${edge.to_column}`,
+        displayLabel: edge.edge_type === 'summary_edge'
+          ? `${edge.label}
 score ${Number(edge.score ?? 0).toFixed(2)}`
-        : edge.edge_type === 'metaedge'
-          ? `metaedge
+          : edge.edge_type === 'metaedge'
+            ? `${isCompressedMetaedge ? 'compressed metaedge' : 'metaedge'}
 wt ${Number(edge.weight ?? 0).toFixed(2)}`
-          : `${edge.from_column} → ${edge.to_column}`
-    }
-  }));
+            : `${edge.from_column} → ${edge.to_column}`
+      },
+      classes: isCompressedMetaedge ? 'compressed-metaedge' : ''
+    };
+  });
 
   return [...nodes, ...edges];
 }
 
 function App() {
   const cyRef = useRef(null);
+  const tableDetailCacheRef = useRef(new Map());
+  const prefetchingTablesRef = useRef(new Set());
+  const skipNextAutoLayoutRef = useRef(false);
 
   const [savedDatabases, setSavedDatabases] = useState([]);
   const [savedDatabaseId, setSavedDatabaseId] = useState('');
@@ -248,6 +319,9 @@ function App() {
   const [tableDetail, setTableDetail] = useState(null);
   const [clusterDetail, setClusterDetail] = useState(null);
   const [clusterSummaryLoading, setClusterSummaryLoading] = useState(false);
+  const [inspectorLoadingTable, setInspectorLoadingTable] = useState('');
+  const [expandingSummaryNodeId, setExpandingSummaryNodeId] = useState('');
+  const [showPreQueryDetails, setShowPreQueryDetails] = useState(false);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('請先上傳 SQLite .db 檔案，或從已儲存的 database 選單載入。');
 
@@ -255,6 +329,134 @@ function App() {
     if (!fullGraph) return [];
     return fullGraph.nodes.map((n) => n.id).sort();
   }, [fullGraph]);
+
+  const captureGraphPositions = useCallback(() => {
+    const cy = cyRef.current;
+    const positions = new Map();
+
+    if (!cy) return positions;
+
+    cy.nodes().forEach((node) => {
+      const position = node.position();
+      positions.set(node.id(), { x: position.x, y: position.y });
+    });
+
+    return positions;
+  }, []);
+
+  const getExpansionNodePositions = useCallback((centerPosition, total, occupiedPositions = []) => {
+    const safeCenter = centerPosition || { x: 0, y: 0 };
+    const positions = [];
+    const occupied = [
+      ...occupiedPositions.filter(Boolean),
+      ...positions
+    ];
+
+    // Nodes in this UI are large ellipses. A small expansion radius makes newly
+    // expanded summary nodes overlap with their neighboring anchors, so we use a
+    // wider ring and reject candidate positions that are too close to existing
+    // visible nodes. This keeps old nodes stable while giving new nodes space.
+    const minXGap = 430;
+    const minYGap = 245;
+    const baseRadius = 310;
+    const ringGap = 235;
+    const preferredAngles = [
+      Math.PI / 2,
+      -Math.PI / 2,
+      0,
+      Math.PI,
+      Math.PI / 4,
+      (3 * Math.PI) / 4,
+      (-3 * Math.PI) / 4,
+      -Math.PI / 4
+    ];
+
+    const collides = (candidate) => occupied.some((position) => {
+      const dx = Math.abs(candidate.x - position.x);
+      const dy = Math.abs(candidate.y - position.y);
+      return dx < minXGap && dy < minYGap;
+    });
+
+    for (let index = 0; index < total; index += 1) {
+      let chosen = null;
+
+      for (let ring = 0; ring < 8 && !chosen; ring += 1) {
+        const radius = baseRadius + ring * ringGap;
+        const angleOffset = ring % 2 === 0 ? 0 : Math.PI / 8;
+        const angleCandidates = preferredAngles.map((angle) => angle + angleOffset);
+
+        for (const angle of angleCandidates) {
+          const candidate = {
+            x: safeCenter.x + Math.cos(angle) * radius,
+            y: safeCenter.y + Math.sin(angle) * radius
+          };
+
+          if (!collides(candidate)) {
+            chosen = candidate;
+            break;
+          }
+        }
+      }
+
+      if (!chosen) {
+        // Fallback: place nodes in a loose diagonal strip instead of stacking them.
+        chosen = {
+          x: safeCenter.x + baseRadius + index * 360,
+          y: safeCenter.y + baseRadius + index * 190
+        };
+      }
+
+      positions.push(chosen);
+      occupied.push(chosen);
+    }
+
+    return positions;
+  }, []);
+
+  const getNewMarkerPosition = useCallback((nodeElement) => {
+    const position = nodeElement?.position || { x: 0, y: 0 };
+    const isSummary = nodeElement?.data?.node_type === 'summary';
+    return {
+      x: position.x + (isSummary ? 155 : 132),
+      y: position.y - (isSummary ? 78 : 64)
+    };
+  }, []);
+
+  const createNewExpansionMarker = useCallback((nodeElement) => ({
+    data: {
+      id: `__new_marker__${nodeElement.data.id}`,
+      label: '',
+      displayLabel: '',
+      node_type: 'new_marker',
+      target_node_id: nodeElement.data.id,
+      importance_score: 0
+    },
+    classes: 'new-expansion-marker',
+    grabbable: false,
+    selectable: false,
+    position: getNewMarkerPosition(nodeElement)
+  }), [getNewMarkerPosition]);
+
+  const syncNewExpansionMarkers = useCallback(() => {
+    const cy = cyRef.current;
+    if (!cy) return;
+
+    cy.nodes('[node_type = "new_marker"]').forEach((marker) => {
+      const targetId = marker.data('target_node_id');
+      const target = cy.getElementById(targetId);
+      if (!target || target.length === 0) {
+        marker.remove();
+        return;
+      }
+
+      const targetPosition = target.position();
+      const targetType = target.data('node_type');
+      marker.position({
+        x: targetPosition.x + (targetType === 'summary' ? 155 : 132),
+        y: targetPosition.y - (targetType === 'summary' ? 78 : 64)
+      });
+    });
+  }, []);
 
 
   const renderFullGraph = useCallback((graphData) => {
@@ -278,6 +480,10 @@ function App() {
     setCurrentFocusTable('');
     setTableDetail(null);
     setClusterDetail(null);
+    setInspectorLoadingTable('');
+    setExpandingSummaryNodeId('');
+    tableDetailCacheRef.current.clear();
+    prefetchingTablesRef.current.clear();
   }, []);
 
   const fetchPreQueryProcessing = useCallback(async (databaseId) => {
@@ -409,6 +615,40 @@ function App() {
     setMessage('已回到上一步。');
   }, [graphHistory]);
 
+  const clearAllNewExpandedMarkers = useCallback(() => {
+    const cy = cyRef.current;
+
+    if (cy) {
+      cy.nodes('[node_type = "new_marker"]').remove();
+      cy.nodes('.newly-expanded').forEach((node) => {
+        node.removeClass('newly-expanded');
+        node.data('is_newly_expanded', false);
+      });
+    }
+
+    skipNextAutoLayoutRef.current = true;
+    setElements((currentElements) => currentElements
+      .filter((el) => el.data?.node_type !== 'new_marker')
+      .map((el) => {
+        if (!el.data?.is_newly_expanded && !String(el.classes || '').includes('newly-expanded')) {
+          return el;
+        }
+        return {
+          ...el,
+          data: {
+            ...el.data,
+            is_newly_expanded: false
+          },
+          classes: String(el.classes || '')
+            .split(/\s+/)
+            .filter((className) => className && className !== 'newly-expanded')
+            .join(' ')
+        };
+      })
+    );
+  }, []);
+
+
   const rerunLayout = useCallback(() => {
     const cy = cyRef.current;
     if (!cy) {
@@ -416,9 +656,14 @@ function App() {
       return;
     }
 
+    // Marker nodes are only meant to indicate newly expanded nodes at their
+    // original position. If the user rearranges the graph, remove the markers
+    // instead of trying to keep them synchronized through a layout animation.
+    clearAllNewExpandedMarkers();
+
     cy.nodes().unlock();
 
-    const layout = cy.elements().layout({
+    const layout = cy.elements().not('[node_type = "new_marker"]').layout({
       ...layoutOptions,
       animate: true,
       animationDuration: 450,
@@ -429,13 +674,18 @@ function App() {
     layout.run();
 
     layout.promiseOn('layoutstop').then(() => {
-      cy.fit(cy.elements(), 70);
+      syncNewExpansionMarkers();
+      cy.fit(cy.elements().not('[node_type = "new_marker"]'), 70);
       setMessage('Graph layout has been rearranged.');
     });
-  }, []);
+  }, [clearAllNewExpandedMarkers, syncNewExpansionMarkers]);
 
   useEffect(() => {
     if (elements.length > 0) {
+      if (skipNextAutoLayoutRef.current) {
+        skipNextAutoLayoutRef.current = false;
+        return;
+      }
       setTimeout(rerunLayout, 30);
     }
   }, [elements, rerunLayout]);
@@ -450,6 +700,46 @@ function App() {
       node.addClass('selected-node');
     }
   }, []);
+
+  const clearNewExpandedMarker = useCallback((nodeId) => {
+    if (!nodeId) return;
+
+    const cy = cyRef.current;
+    const markerId = `__new_marker__${nodeId}`;
+
+    if (cy) {
+      const cyNode = cy.getElementById(nodeId);
+      if (cyNode && cyNode.length > 0) {
+        cyNode.removeClass('newly-expanded');
+        cyNode.data('is_newly_expanded', false);
+      }
+
+      const markerNode = cy.getElementById(markerId);
+      if (markerNode && markerNode.length > 0) {
+        markerNode.remove();
+      }
+    }
+
+    skipNextAutoLayoutRef.current = true;
+    setElements((currentElements) => currentElements
+      .filter((el) => el.data?.id !== markerId)
+      .map((el) => {
+        if (el.data?.id !== nodeId) return el;
+        return {
+          ...el,
+          data: {
+            ...el.data,
+            is_newly_expanded: false
+          },
+          classes: String(el.classes || '')
+            .split(/\s+/)
+            .filter((className) => className && className !== 'newly-expanded')
+            .join(' ')
+        };
+      })
+    );
+  }, []);
+
 
 
 
@@ -486,6 +776,19 @@ function App() {
     setMessage(`${tableName} 已從 Query Set 移除。`);
   }, []);
 
+  const toggleSelectedTableQuerySet = useCallback(() => {
+    if (!selectedTable) {
+      setMessage('請先選擇一張 table。');
+      return;
+    }
+
+    if (querySet.includes(selectedTable)) {
+      removeFromQuerySet(selectedTable);
+    } else {
+      addToQuerySet(selectedTable);
+    }
+  }, [selectedTable, querySet, addToQuerySet, removeFromQuerySet]);
+
   const clearQuerySet = useCallback(() => {
     setQuerySet([]);
     setMessage('已清空 Query Set。');
@@ -497,11 +800,64 @@ function App() {
     setMessage(`已套用 recommended initial query set：${recommended.join(', ') || 'empty'}。`);
   }, [preQueryInfo]);
 
-  const fetchTableDetail = useCallback(async (tableName) => {
+  const getTableCacheKey = useCallback((databaseId, tableName) => `${databaseId}::${tableName}`, []);
+
+  const buildInstantTableDetail = useCallback((tableName, nodeData = null, loading = true) => ({
+    table: {
+      name: tableName,
+      columns: nodeData?.columns || [],
+      primary_keys: nodeData?.primary_keys || [],
+      row_count: nodeData?.row_count ?? null
+    },
+    node: nodeData || null,
+    outgoing_edges: [],
+    referenced_by: [],
+    loading
+  }), []);
+
+  const prefetchTableDetail = useCallback(async (tableName) => {
     if (!databaseInfo || !tableName) return;
+
+    const cacheKey = getTableCacheKey(databaseInfo.database_id, tableName);
+    if (tableDetailCacheRef.current.has(cacheKey) || prefetchingTablesRef.current.has(cacheKey)) return;
+
+    prefetchingTablesRef.current.add(cacheKey);
+    try {
+      const res = await fetch(`${API_BASE}/api/databases/${databaseInfo.database_id}/tables/${tableName}`);
+      if (!res.ok) return;
+      const detail = await res.json();
+      tableDetailCacheRef.current.set(cacheKey, detail);
+    } catch (err) {
+      // Background prefetch should never interrupt graph interaction.
+    } finally {
+      prefetchingTablesRef.current.delete(cacheKey);
+    }
+  }, [databaseInfo, getTableCacheKey]);
+
+  const fetchTableDetail = useCallback(async (tableName, nodeData = null) => {
+    if (!databaseInfo || !tableName) return;
+
     setSelectedTable(tableName);
-    setTableDetail(null);
     setClusterDetail(null);
+
+    const cacheKey = getTableCacheKey(databaseInfo.database_id, tableName);
+    const cachedDetail = tableDetailCacheRef.current.get(cacheKey);
+
+    if (cachedDetail) {
+      setInspectorLoadingTable('');
+      setTableDetail({
+        ...cachedDetail,
+        node: cachedDetail.node || nodeData || null,
+        loading: false
+      });
+      return;
+    }
+
+    setInspectorLoadingTable(tableName);
+
+    // Open the inspector immediately so node clicks feel responsive.
+    // The full column / FK metadata is filled in after the API call returns.
+    setTableDetail(buildInstantTableDetail(tableName, nodeData, true));
 
     try {
       const res = await fetch(`${API_BASE}/api/databases/${databaseInfo.database_id}/tables/${tableName}`);
@@ -509,11 +865,33 @@ function App() {
         const error = await res.json();
         throw new Error(error.detail || 'Failed to fetch table detail');
       }
-      setTableDetail(await res.json());
+      const detail = await res.json();
+      tableDetailCacheRef.current.set(cacheKey, detail);
+      setTableDetail({
+        ...detail,
+        node: detail.node || nodeData || null,
+        loading: false
+      });
     } catch (err) {
       setMessage(`取得 table detail 失敗：${err.message}`);
+    } finally {
+      setInspectorLoadingTable((current) => current === tableName ? '' : current);
     }
-  }, [databaseInfo]);
+  }, [databaseInfo, getTableCacheKey, buildInstantTableDetail]);
+
+  useEffect(() => {
+    if (!databaseInfo || elements.length === 0) return;
+
+    const visibleTableNames = elements
+      .filter((el) => el.data && ['query', 'bridge', 'table', 'focus'].includes(el.data.node_type))
+      .map((el) => el.data.id)
+      .filter(Boolean)
+      .slice(0, 40);
+
+    visibleTableNames.forEach((tableName, index) => {
+      window.setTimeout(() => prefetchTableDetail(tableName), 30 * index);
+    });
+  }, [databaseInfo, elements, prefetchTableDetail]);
 
   const updateNodeLabel = useCallback((nodeId, label, summary) => {
     setElements((currentElements) =>
@@ -728,6 +1106,7 @@ function App() {
   };
 
   const expandSummaryNode = async (nodeId, nodeData) => {
+    if (expandingSummaryNodeId) return;
     if (viewMode === 'query-summary') {
       if (!databaseInfo || !Array.isArray(nodeData.tables) || nodeData.tables.length === 0) {
         setClusterDetail(nodeData);
@@ -739,6 +1118,7 @@ function App() {
       pushCurrentGraphState();
       setClusterDetail(nodeData);
       markSelectedNode(nodeId);
+      setExpandingSummaryNodeId(nodeId);
       setMessage(`正在展開 ${nodeData.label}...`);
 
       try {
@@ -763,28 +1143,46 @@ function App() {
         }
 
         const expansion = await res.json();
+        const positionsBeforeExpansion = captureGraphPositions();
+        const expansionCenter = positionsBeforeExpansion.get(nodeId) || { x: 0, y: 0 };
+
+        skipNextAutoLayoutRef.current = true;
 
         setElements((currentElements) => {
           const existingIds = new Set(currentElements.map((el) => el.data?.id));
-          const kept = currentElements.filter((el) => {
-            if (!el.data) return true;
-            if (el.data.id === nodeId) return false;
-            if (el.data.source === nodeId || el.data.target === nodeId) return false;
-            return true;
-          });
+          const kept = currentElements
+            .filter((el) => {
+              if (!el.data) return true;
+              if (el.data.id === nodeId) return false;
+              if (el.data.source === nodeId || el.data.target === nodeId) return false;
+              return true;
+            })
+            .map((el) => {
+              if (!el.data || el.data.source || el.data.target) return el;
+              const position = positionsBeforeExpansion.get(el.data.id);
+              return position ? { ...el, position } : el;
+            });
 
-          const newNodes = expansion.nodes
-            .filter((node) => !existingIds.has(node.id))
-            .map((node) => ({
-              data: {
-                ...node,
-                id: node.id,
-                label: node.label,
-                displayLabel: node.node_type === 'summary'
-                  ? `${node.label}\n${node.table_count || node.tables?.length || 0} tables collapsed`
-                  : node.label
-              }
-            }));
+          const candidateNewNodes = expansion.nodes.filter((node) => !existingIds.has(node.id));
+          const occupiedPositions = kept
+            .filter((el) => el.data && !el.data.source && !el.data.target && el.data.node_type !== 'new_marker')
+            .map((el) => el.position)
+            .filter(Boolean);
+          const expansionPositions = getExpansionNodePositions(expansionCenter, candidateNewNodes.length, occupiedPositions);
+
+          const newNodes = candidateNewNodes.map((node, index) => ({
+            data: {
+              ...node,
+              id: node.id,
+              label: node.label,
+              displayLabel: node.node_type === 'summary'
+                ? `${node.label}\n${node.table_count || node.tables?.length || 0} tables collapsed`
+                : node.label,
+              is_newly_expanded: true
+            },
+            classes: `${node.node_type === 'query' ? 'query-node ' : ''}newly-expanded`.trim(),
+            position: expansionPositions[index]
+          }));
 
           const keptIdsAfterSummaryRemoval = new Set(kept.map((el) => el.data?.id));
           const newEdges = expansion.edges
@@ -811,12 +1209,18 @@ function App() {
               }
             }));
 
-          return [...kept, ...newNodes, ...newEdges];
+          const markerNodes = newNodes.map((nodeElement) => createNewExpansionMarker(nodeElement));
+
+          return [...kept, ...newNodes, ...markerNodes, ...newEdges];
         });
 
         setMessage(`已展開 ${nodeData.label}：新增 ${expansion.nodes.length} node(s)。`);
+        setTableDetail(null);
+        setClusterDetail(null);
       } catch (err) {
         setMessage(`展開 query summary node 失敗：${err.message}`);
+      } finally {
+        setExpandingSummaryNodeId((current) => current === nodeId ? '' : current);
       }
       return;
     }
@@ -830,6 +1234,7 @@ function App() {
 
     pushCurrentGraphState();
 
+    setExpandingSummaryNodeId(nodeId);
     setClusterDetail(nodeData);
     markSelectedNode(nodeId);
 
@@ -854,26 +1259,46 @@ function App() {
       }
 
       const expansion = await res.json();
+      const positionsBeforeExpansion = captureGraphPositions();
+      const expansionCenter = positionsBeforeExpansion.get(nodeId) || { x: 0, y: 0 };
+
+      skipNextAutoLayoutRef.current = true;
 
       setElements((currentElements) => {
         const existingIds = new Set(currentElements.map((el) => el.data?.id));
-        const kept = currentElements.filter((el) => {
-          if (!el.data) return true;
-          if (el.data.id === nodeId) return false;
-          if (el.data.source === nodeId || el.data.target === nodeId) return false;
-          return true;
-        });
+        const kept = currentElements
+          .filter((el) => {
+            if (!el.data) return true;
+            if (el.data.id === nodeId) return false;
+            if (el.data.source === nodeId || el.data.target === nodeId) return false;
+            return true;
+          })
+          .map((el) => {
+            if (!el.data || el.data.source || el.data.target) return el;
+            const position = positionsBeforeExpansion.get(el.data.id);
+            return position ? { ...el, position } : el;
+          });
 
-        const newNodes = expansion.nodes
-          .filter((node) => !existingIds.has(node.id))
-          .map((node) => ({
-            data: {
-              ...node,
-              id: node.id,
-              label: node.label,
-              displayLabel: node.label
-            }
-          }));
+        const candidateNewNodes = expansion.nodes.filter((node) => !existingIds.has(node.id));
+        const occupiedPositions = kept
+          .filter((el) => el.data && !el.data.source && !el.data.target && el.data.node_type !== 'new_marker')
+          .map((el) => el.position)
+          .filter(Boolean);
+        const expansionPositions = getExpansionNodePositions(expansionCenter, candidateNewNodes.length, occupiedPositions);
+
+        const newNodes = candidateNewNodes.map((node, index) => ({
+          data: {
+            ...node,
+            id: node.id,
+            label: node.label,
+            displayLabel: node.node_type === 'summary'
+              ? `${node.label}\n${node.table_count || node.tables?.length || 0} tables collapsed`
+              : node.label,
+            is_newly_expanded: true
+          },
+          classes: `${node.node_type === 'query' ? 'query-node ' : ''}newly-expanded`.trim(),
+          position: expansionPositions[index]
+        }));
 
         const keptIdsAfterSummaryRemoval = new Set(kept.map((el) => el.data?.id));
         const newEdges = expansion.edges
@@ -902,43 +1327,91 @@ wt ${Number(edge.weight ?? 0).toFixed(2)}`
             }
           }));
 
-        return [...kept, ...newNodes, ...newEdges];
+        const markerNodes = newNodes.map((nodeElement) => createNewExpansionMarker(nodeElement));
+
+        return [...kept, ...newNodes, ...markerNodes, ...newEdges];
       });
 
       setMessage(`已展開 ${nodeData.label}：${expansion.nodes.length} table(s)。`);
+      setTableDetail(null);
+      setClusterDetail(null);
     } catch (err) {
       setMessage(`展開 summary node 失敗：${err.message}`);
+    } finally {
+      setExpandingSummaryNodeId((current) => current === nodeId ? '' : current);
     }
   };
 
   const handleCyReady = useCallback((cy) => {
     cyRef.current = cy;
 
-	cy.off('tap', 'node');
-	cy.off('mouseover', 'edge');
-	cy.off('mouseout', 'edge');
+    // CytoscapeComponent may call cy callback again after re-rendering.
+    // Remove old handlers first to avoid duplicated tap / hover events.
+    cy.off('tap', 'node');
+    cy.off('drag', 'node');
+    cy.off('mouseover', 'edge');
+    cy.off('mouseout', 'edge');
 
     cy.on('tap', 'node', (event) => {
       const node = event.target;
       const data = node.data();
 
+      if (data.node_type === 'new_marker') {
+        return;
+      }
+
       markSelectedNode(data.id);
+      clearNewExpandedMarker(data.id);
 
       if (data.node_type === 'summary') {
-        expandSummaryNode(data.id, data);
+        setTableDetail(null);
+        setClusterDetail(data);
+        setSelectedTable('');
+
+        const focusTableForSummary = currentFocusTable || selectedTable;
+        if (viewMode !== 'query-summary' && focusTableForSummary) {
+          fetchClusterSummary(data.id, focusTableForSummary).then((summary) => {
+            if (summary) {
+              setClusterDetail((current) => current?.id === data.id
+                ? { ...current, llm_summary: summary }
+                : current
+              );
+              updateNodeLabel(data.id, summary.module_name_zh, summary);
+            }
+          });
+        }
       } else {
-        fetchTableDetail(data.id);
+        fetchTableDetail(data.id, data);
+      }
+    });
+
+    cy.on('drag', 'node', (event) => {
+      const data = event.target.data();
+      if (data.node_type === 'new_marker') return;
+      if (data.is_newly_expanded || event.target.hasClass('newly-expanded')) {
+        clearNewExpandedMarker(data.id);
       }
     });
 
     cy.on('mouseover', 'edge', (event) => {
+      event.target.addClass('edge-hover');
       event.target.select();
     });
 
     cy.on('mouseout', 'edge', (event) => {
+      event.target.removeClass('edge-hover');
       event.target.unselect();
     });
-  }, [markSelectedNode, fetchTableDetail, databaseInfo, selectedTable, currentFocusTable, focusDepth, elements, viewMode]);
+  }, [
+    markSelectedNode,
+    clearNewExpandedMarker,
+    fetchTableDetail,
+    fetchClusterSummary,
+    updateNodeLabel,
+    currentFocusTable,
+    selectedTable,
+    viewMode
+  ]);
 
   const focusRecommendedTable = (tableName) => {
     if (!tableName) return;
@@ -997,6 +1470,27 @@ wt ${Number(edge.weight ?? 0).toFixed(2)}`
     }
   };
 
+  const closeInspector = useCallback(() => {
+    setTableDetail(null);
+    setClusterDetail(null);
+    setInspectorLoadingTable('');
+    const cy = cyRef.current;
+    if (cy) {
+      cy.nodes().removeClass('selected-node');
+    }
+  }, []);
+
+  const currentViewLabel = viewMode === 'query-summary'
+    ? 'Query-aware Summary Graph'
+    : viewMode === 'summary'
+      ? 'Focus Summary View'
+      : viewMode === 'focus'
+        ? 'Focus Graph'
+        : 'Full Schema Graph';
+
+  const visibleNodeCount = elements.filter((el) => el?.data?.source === undefined).length;
+  const visibleEdgeCount = elements.filter((el) => el?.data?.source !== undefined).length;
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -1036,92 +1530,42 @@ wt ${Number(edge.weight ?? 0).toFixed(2)}`
           </div>
         )}
 
-        {preQueryInfo && (
-          <div className="cluster-overview-card">
-            <strong>Pre-query Processing</strong>
-            <div className="muted">
-              Weighted graph + random-walk importance + paper modularity clustering are ready.
+        {databaseInfo && (
+          <div className="current-view-card">
+            <div className="card-heading-row">
+              <strong>Current View</strong>
+              <span className="mode-pill">{currentViewLabel}</span>
             </div>
-
-            <div className="prequery-stats">
-              <span>{preQueryInfo.table_count} tables</span>
-              <span>{preQueryInfo.edge_count} weighted edges</span>
-              <span>{preQueryInfo.clusters?.length || 0} clusters</span>
-              <span>Q {Number(preQueryInfo.modularity_score ?? 0).toFixed(3)}</span>
-            </div>
-
-            <h3>Clustering Method</h3>
-            <div className="score-grid compact-score-grid">
-              <span>Method</span>
-              <strong>{preQueryInfo.clustering_method || 'paper_greedy_weighted_modularity'}</strong>
-              <span>Merge count</span>
-              <strong>{Number(preQueryInfo.merge_count ?? 0).toFixed(0)}</strong>
-              <span>Total edge strength</span>
-              <strong>{Number(preQueryInfo.total_edge_strength ?? 0).toFixed(3)}</strong>
-            </div>
-
-            <h3>Edge Weight Summary</h3>
-            <div className="score-grid compact-score-grid">
-              <span>Avg edge score</span>
-              <strong>{Number(preQueryInfo.edge_weight_summary?.average_score ?? 0).toFixed(2)}</strong>
-              <span>Max edge score</span>
-              <strong>{Number(preQueryInfo.edge_weight_summary?.max_score ?? 0).toFixed(2)}</strong>
-              <span>Avg weight</span>
-              <strong>{Number(preQueryInfo.edge_weight_summary?.average_weight ?? 0).toFixed(2)}</strong>
-            </div>
-
-            <h3>Top Importance Tables</h3>
-            <div className="importance-list">
-              {(preQueryInfo.top_importance_tables || []).slice(0, 5).map((item) => (
-                <button
-                  key={item.table}
-                  className="importance-item"
-                  onClick={() => focusRecommendedTable(item.table)}
-                  title={item.reason}
-                >
-                  <span>#{item.rank} {item.table}</span>
-                  <strong>{Number(item.importance_score ?? 0).toFixed(2)}</strong>
-                </button>
-              ))}
-            </div>
-
-            <h3>Recommended Initial Query Set</h3>
-            <div className="query-chip-list">
-              {(preQueryInfo.recommended_query_set || []).map((tableName) => (
-                <button
-                  key={tableName}
-                  className="query-chip"
-                  onClick={() => addToQuerySet(tableName)}
-                  title="Add representative table to Query Set"
-                >
-                  {tableName}
-                </button>
-              ))}
-            </div>
-
-            <h3>Initial Clusters</h3>
-            <div className="initial-cluster-list">
-              {(preQueryInfo.clusters || []).slice(0, 6).map((cluster) => (
-                <div key={cluster.cluster_id} className="initial-cluster-item">
-                  <div className="cluster-title-line">
-                    <span>{cluster.label}</span>
-                    {cluster.query_set_candidate && <small>query candidate</small>}
-                  </div>
-                  <div className="cluster-meta">
-                    Rep: <button onClick={() => focusRecommendedTable(cluster.representative_table)}>{cluster.representative_table}</button>
-                    {' · '}{cluster.table_count} tables
-                    {' · '}Qᵢ {Number(cluster.modularity_contribution ?? 0).toFixed(3)}
-                    {' · '}rep importance {Number(cluster.representative_score ?? 0).toFixed(2)}
-                  </div>
-                  <div className="cluster-table-preview">
-                    {cluster.tables.slice(0, 5).join(', ')}{cluster.tables.length > 5 ? ', ...' : ''}
-                  </div>
-                </div>
-              ))}
+            <div className="view-stat-grid">
+              <span>Visible nodes</span>
+              <strong>{visibleNodeCount}</strong>
+              <span>Visible edges</span>
+              <strong>{visibleEdgeCount}</strong>
+              <span>Query set</span>
+              <strong>{querySet.length}</strong>
+              <span>Budget</span>
+              <strong>{nodeBudget}</strong>
             </div>
           </div>
         )}
 
+        {tableNames.length > 0 && (
+          <div className="legend-card">
+            <div className="card-heading-row">
+              <strong>Legend</strong>
+              <span className="subtle-pill">Graph semantics</span>
+            </div>
+            <div className="legend-grid">
+              <span><i className="legend-node query" /> Query table</span>
+              <span><i className="legend-node bridge" /> Bridge table</span>
+              <span><i className="legend-node summary" /> Summary node</span>
+              <span><i className="legend-edge fk" /> Original FK</span>
+              <span><i className="legend-edge meta" /> Metaedge</span>
+              <span><i className="legend-edge compressed" /> Compressed edge</span>
+            </div>
+            <div className="section-note">Edge labels are hidden by default. Hover an edge to inspect its relation and weight.</div>
+          </div>
+        )}
 
         {tableNames.length > 0 && (
           <div className="query-set-card">
@@ -1130,7 +1574,7 @@ wt ${Number(edge.weight ?? 0).toFixed(2)}`
               <span>{querySet.length} table(s)</span>
             </div>
             <p className="muted">
-              將目前關心的 tables 加入 Query Set，下一階段會用它產生 query-aware summary graph。
+              將關心的 tables 加入 Query Set，再用 node budget 產生 query-aware summary graph。
             </p>
 
             <div className="query-chip-list editable-query-list">
@@ -1198,39 +1642,152 @@ wt ${Number(edge.weight ?? 0).toFixed(2)}`
               onClick={generateQuerySummaryGraph}
               disabled={loading || querySet.length === 0}
             >
-              Generate Query Summary Graph
+              Generate Summary Graph
             </button>
           </div>
         )}
 
+        {preQueryInfo && (
+          <div className="cluster-overview-card collapsible-card">
+            <div className="card-heading-row">
+              <strong>Pre-query Processing</strong>
+              <button
+                className="text-button"
+                onClick={() => setShowPreQueryDetails((value) => !value)}
+              >
+                {showPreQueryDetails ? 'Hide details' : 'Show details'}
+              </button>
+            </div>
+            <div className="muted">
+              Preprocessing is ready. Recommended query tables and schema clusters were generated from paper-based edge weights and importance scores.
+            </div>
+
+            <div className="process-checklist">
+              <span>✓ Edge weights computed</span>
+              <span>✓ Importance scores computed</span>
+              <span>✓ Initial clusters generated</span>
+              <span>✓ Recommended query set ready</span>
+            </div>
+
+            <div className="prequery-stats">
+              <span>{preQueryInfo.table_count} tables</span>
+              <span>{preQueryInfo.edge_count} weighted edges</span>
+              <span>{preQueryInfo.clusters?.length || 0} clusters</span>
+              <span>Q {Number(preQueryInfo.modularity_score ?? 0).toFixed(3)}</span>
+            </div>
+
+            <h3>Recommended Initial Query Set</h3>
+            <div className="query-chip-list">
+              {(preQueryInfo.recommended_query_set || []).map((tableName) => (
+                <button
+                  key={tableName}
+                  className="query-chip"
+                  onClick={() => addToQuerySet(tableName)}
+                  title="Add representative table to Query Set"
+                >
+                  {tableName}
+                </button>
+              ))}
+            </div>
+
+            {showPreQueryDetails && (
+              <>
+                <h3>Clustering Method</h3>
+                <div className="score-grid compact-score-grid">
+                  <span>Method</span>
+                  <strong>{preQueryInfo.clustering_method || 'paper_greedy_weighted_modularity'}</strong>
+                  <span>Merge count</span>
+                  <strong>{Number(preQueryInfo.merge_count ?? 0).toFixed(0)}</strong>
+                  <span>Total edge strength</span>
+                  <strong>{Number(preQueryInfo.total_edge_strength ?? 0).toFixed(3)}</strong>
+                </div>
+
+                <h3>Edge Weight Summary</h3>
+                <div className="score-grid compact-score-grid">
+                  <span>Avg edge score</span>
+                  <strong>{Number(preQueryInfo.edge_weight_summary?.average_score ?? 0).toFixed(2)}</strong>
+                  <span>Max edge score</span>
+                  <strong>{Number(preQueryInfo.edge_weight_summary?.max_score ?? 0).toFixed(2)}</strong>
+                  <span>Avg weight</span>
+                  <strong>{Number(preQueryInfo.edge_weight_summary?.average_weight ?? 0).toFixed(2)}</strong>
+                </div>
+
+                <h3>Top Importance Tables</h3>
+                <div className="importance-list">
+                  {(preQueryInfo.top_importance_tables || []).slice(0, 5).map((item) => (
+                    <button
+                      key={item.table}
+                      className="importance-item"
+                      onClick={() => focusRecommendedTable(item.table)}
+                      title={item.reason}
+                    >
+                      <span>#{item.rank} {item.table}</span>
+                      <strong>{Number(item.importance_score ?? 0).toFixed(2)}</strong>
+                    </button>
+                  ))}
+                </div>
+
+                <h3>Initial Clusters</h3>
+                <div className="section-note">Sorted by representative importance. Qᵢ is the modularity contribution.</div>
+                <div className="initial-cluster-list">
+                  {(preQueryInfo.clusters || []).slice(0, 6).map((cluster) => (
+                    <div key={cluster.cluster_id} className="initial-cluster-item">
+                      <div className="cluster-title-line">
+                        <span>{cluster.label}</span>
+                        {cluster.query_set_candidate && <small className="candidate-badge">recommended</small>}
+                      </div>
+                      <div className="cluster-representative-line">
+                        <span>Representative</span>
+                        <button onClick={() => focusRecommendedTable(cluster.representative_table)}>{cluster.representative_table}</button>
+                      </div>
+                      <div className="cluster-metric-grid">
+                        <span>Rep. importance</span>
+                        <strong>{Number(cluster.representative_score ?? 0).toFixed(2)}</strong>
+                        <span>Qᵢ</span>
+                        <strong>{Number(cluster.modularity_contribution ?? 0).toFixed(3)}</strong>
+                        <span>eᵢᵢ</span>
+                        <strong>{Number(cluster.e_ii ?? 0).toFixed(3)}</strong>
+                        <span>aᵢ</span>
+                        <strong>{Number(cluster.a_i ?? 0).toFixed(3)}</strong>
+                      </div>
+                      <div className="cluster-table-preview">
+                        {cluster.table_count} tables · {cluster.tables.slice(0, 5).join(', ')}{cluster.tables.length > 5 ? ', ...' : ''}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+
+
+
+
         {tableNames.length > 0 && (
           <>
-            <label className="field-label">搜尋 / 選擇 focus table</label>
+            <label className="field-label">搜尋 / 選擇 table</label>
             <select className="select" value={selectedTable} onChange={handleSearchChange}>
               <option value="">選擇 table</option>
               {tableNames.map((name) => <option key={name} value={name}>{name}</option>)}
             </select>
 
-            <label className="field-label">Focus depth</label>
-            <select className="select" value={focusDepth} onChange={handleDepthChange}>
-              <option value={1}>1-hop neighbors</option>
-              <option value={2}>2-hop neighbors</option>
-              <option value={3}>3-hop neighbors</option>
-            </select>
-
-            <div className="button-row">
-              <button className="secondary-button" onClick={handleSummaryButton}>Summary View</button>
-              <button className="secondary-button" onClick={handleFullGraphButton}>Full Graph</button>
+            <div className="button-row selected-table-actions">
+              <button
+                className={selectedTable && querySet.includes(selectedTable) ? 'secondary-button danger-button' : 'secondary-button'}
+                onClick={toggleSelectedTableQuerySet}
+                disabled={!selectedTable}
+              >
+                {selectedTable && querySet.includes(selectedTable) ? 'Remove selected from Query Set' : 'Add selected to Query Set'}
+              </button>
             </div>
 
-            <button
-              className="secondary-button"
-              onClick={restorePreviousStep}
-              disabled={graphHistory.length === 0}
-              title={graphHistory.length === 0 ? '目前沒有上一步' : '回到上一個 graph 狀態'}
-            >
-              回到上一步
-            </button>
+            <div className="button-row selected-table-actions">
+              <button className="secondary-button" onClick={handleSummaryButton} disabled={!selectedTable}>
+                Open Focus Summary
+              </button>
+            </div>
           </>
         )}
 
@@ -1241,7 +1798,6 @@ wt ${Number(edge.weight ?? 0).toFixed(2)}`
             <div>Node budget: {querySummaryInfo.node_budget}</div>
             <div>Query nodes: {querySummaryInfo.query_node_count ?? querySummaryInfo.query_tables.length}</div>
             <div>Bridge nodes: {querySummaryInfo.bridge_node_count ?? 0}</div>
-            <div>Context nodes: {querySummaryInfo.context_node_count ?? 0}</div>
             <div>Summary nodes: {querySummaryInfo.summary_node_count}</div>
             <div>Compressed hidden tables: {querySummaryInfo.hidden_node_count}</div>
             <div>Compressed edges: {querySummaryInfo.stats?.compressed_edge_count ?? 0}</div>
@@ -1392,6 +1948,164 @@ wt ${Number(edge.weight ?? 0).toFixed(2)}`
       </aside>
 
       <main className="graph-area">
+        <div className="graph-layout-toolbar">
+          <button
+            className="graph-toolbar-button layout-button"
+            onClick={rerunLayout}
+            disabled={elements.length === 0}
+            title="重新排列目前 graph"
+          >
+            重新排列
+          </button>
+        </div>
+
+        <div className="graph-toolbar">
+          <button
+            className="graph-toolbar-button"
+            onClick={restorePreviousStep}
+            disabled={graphHistory.length === 0}
+            title={graphHistory.length === 0 ? '目前沒有上一步' : '回到上一個 graph 狀態'}
+          >
+            ← 回到上一步
+          </button>
+          <button
+            className="graph-toolbar-button primary"
+            onClick={handleFullGraphButton}
+            disabled={!fullGraph}
+            title="回到完整 schema graph"
+          >
+            Full Graph
+          </button>
+        </div>
+
+        {(tableDetail || clusterDetail) && (
+          <aside className={clusterDetail ? 'node-inspector summary-inspector' : 'node-inspector'}>
+            <div className="inspector-header">
+              <div>
+                <div className="inspector-eyebrow">{clusterDetail ? 'Summary node' : 'Table node'}</div>
+                <h2>{clusterDetail?.llm_summary?.module_name_zh || clusterDetail?.label || tableDetail?.table?.name}</h2>
+              </div>
+              <button className="inspector-close" onClick={closeInspector} title="Close inspector">×</button>
+            </div>
+
+            {tableDetail && (
+              <div className="inspector-body">
+                <div className="inspector-actions">
+                  <button
+                    className={querySet.includes(tableDetail.table.name) ? 'inspector-action danger' : 'inspector-action primary'}
+                    onClick={() => querySet.includes(tableDetail.table.name)
+                      ? removeFromQuerySet(tableDetail.table.name)
+                      : addToQuerySet(tableDetail.table.name)}
+                  >
+                    {querySet.includes(tableDetail.table.name) ? 'Remove from Query Set' : 'Add to Query Set'}
+                  </button>
+                </div>
+
+                {(tableDetail.loading || inspectorLoadingTable === tableDetail.table.name) && (
+                  <div className="inspector-loading">Loading table details...</div>
+                )}
+
+                <div className="inspector-stat-row">
+                  <span>Rows</span>
+                  <strong>{tableDetail.table.row_count ?? '?'}</strong>
+                </div>
+                <div className="inspector-stat-row">
+                  <span>Primary key</span>
+                  <strong>{tableDetail.table.primary_keys.join(', ') || 'None'}</strong>
+                </div>
+                {tableDetail.node && (
+                  <div className="inspector-stat-row">
+                    <span>Importance</span>
+                    <strong>{Number(tableDetail.node.importance_score ?? 0).toFixed(2)}</strong>
+                  </div>
+                )}
+
+                <h3>Columns</h3>
+                <div className="inspector-column-list">
+                  {tableDetail.table.columns.length === 0 ? (
+                    <div className="inspector-empty">Column metadata is loading...</div>
+                  ) : tableDetail.table.columns.map((col) => (
+                    <div key={col.name} className="inspector-column-item">
+                      <span>{col.name}</span>
+                      <small>{col.type || 'UNKNOWN'}{col.is_primary_key ? ' · PK' : ''}</small>
+                    </div>
+                  ))}
+                </div>
+
+                <h3>Relationships</h3>
+                <div className="inspector-relation-summary">
+                  <span>Outgoing FKs</span>
+                  <strong>{tableDetail.outgoing_edges?.length || 0}</strong>
+                  <span>Referenced by</span>
+                  <strong>{tableDetail.referenced_by?.length || 0}</strong>
+                </div>
+
+                {(tableDetail.outgoing_edges || []).slice(0, 4).map((edge) => (
+                  <div key={edge.id} className="inspector-edge-item">
+                    {edge.source}.{edge.from_column} → {edge.target}.{edge.to_column}
+                  </div>
+                ))}
+                {(tableDetail.referenced_by || []).slice(0, 4).map((edge) => (
+                  <div key={edge.id} className="inspector-edge-item incoming">
+                    {edge.source}.{edge.from_column} → {edge.target}.{edge.to_column}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {clusterDetail && (
+              <div className="inspector-body">
+                <div className="inspector-actions">
+                  <button
+                    className="inspector-action primary"
+                    onClick={() => expandSummaryNode(clusterDetail.id, clusterDetail)}
+                    disabled={expandingSummaryNodeId === clusterDetail.id || !Array.isArray(clusterDetail.tables) || clusterDetail.tables.length === 0}
+                  >
+                    {expandingSummaryNodeId === clusterDetail.id ? 'Expanding...' : 'Expand Summary Node'}
+                  </button>
+                </div>
+
+                <div className="inspector-stat-row">
+                  <span>Tables inside</span>
+                  <strong>{clusterDetail.table_count || clusterDetail.tables?.length || 0}</strong>
+                </div>
+                {(clusterDetail.score_breakdown?.anchor_table || clusterDetail.representative_table) && (
+                  <div className="inspector-stat-row">
+                    <span>Representative</span>
+                    <strong>{clusterDetail.score_breakdown?.anchor_table || clusterDetail.representative_table}</strong>
+                  </div>
+                )}
+                {typeof clusterDetail.importance_score === 'number' && (
+                  <div className="inspector-stat-row">
+                    <span>Importance</span>
+                    <strong>{Number(clusterDetail.importance_score).toFixed(2)}</strong>
+                  </div>
+                )}
+
+                <p className="inspector-description">
+                  {clusterDetail.llm_summary?.description_zh || clusterDetail.description || 'This summary node compresses related tables. Expand it to inspect the next level of schema detail.'}
+                </p>
+
+                <h3>Contained tables</h3>
+                <div className="summary-table-list">
+                  {(clusterDetail.tables || []).map((tableName) => (
+                    <button
+                      key={tableName}
+                      className="summary-table-chip"
+                      onClick={() => {
+                        setSelectedTable(tableName);
+                        fetchTableDetail(tableName);
+                      }}
+                    >
+                      {tableName}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </aside>
+        )}
+
         {elements.length === 0 ? (
           <div className="empty-state">
             <h2>尚未載入 graph</h2>

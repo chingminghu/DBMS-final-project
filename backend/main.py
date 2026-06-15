@@ -94,6 +94,20 @@ def _load_schema_or_404(database_id: str):
     return tables
 
 
+def _load_schema_and_path_or_404(database_id: str):
+    """Load schema metadata and return the saved SQLite path for data-aware scoring.
+
+    Several paper-exact stages need to read table values to compute column
+    entropy, mutual information, and transfer probabilities.  If db_path is
+    not passed into graph_builder, those values silently fall back to zero.
+    """
+    tables = _load_schema_or_404(database_id)
+    db_path = get_database_path(database_id)
+    if db_path is None:
+        raise HTTPException(status_code=404, detail="Database file not found for data-aware graph processing.")
+    return tables, db_path
+
+
 def _schema_response(database_id: str, tables):
     foreign_key_count = sum(len(table.foreign_keys) for table in tables)
     return DatabaseSchemaResponse(
@@ -176,8 +190,8 @@ async def upload_database(file: UploadFile = File(...)):
 
 @app.get("/api/databases/{database_id}/graph", response_model=SchemaGraphResponse)
 def get_schema_graph(database_id: str):
-    tables = _load_schema_or_404(database_id)
-    return build_schema_graph(database_id, tables)
+    tables, db_path = _load_schema_and_path_or_404(database_id)
+    return build_schema_graph(database_id, tables, db_path=db_path)
 
 
 @app.get("/api/databases/{database_id}/clusters/initial", response_model=InitialClusteringResponse)
@@ -186,8 +200,14 @@ def get_initial_clusters(
     max_query_tables: int = Query(5, ge=1, le=10, description="Maximum representative tables recommended as initial query set"),
     target_clusters: int | None = Query(None, ge=1, le=20, description="Optional target number of initial clusters"),
 ):
-    tables = _load_schema_or_404(database_id)
-    return build_initial_clusters(database_id, tables, max_query_tables=max_query_tables, target_cluster_count=target_clusters)
+    tables, db_path = _load_schema_and_path_or_404(database_id)
+    return build_initial_clusters(
+        database_id,
+        tables,
+        max_query_tables=max_query_tables,
+        target_cluster_count=target_clusters,
+        db_path=db_path,
+    )
 
 
 @app.get("/api/databases/{database_id}/prequery", response_model=PreQueryProcessingResponse)
@@ -197,19 +217,20 @@ def get_prequery_processing_summary(
     target_clusters: int | None = Query(None, ge=1, le=20, description="Optional target number of initial clusters"),
     top_n_tables: int = Query(8, ge=1, le=20, description="Number of top importance tables to return"),
 ):
-    tables = _load_schema_or_404(database_id)
+    tables, db_path = _load_schema_and_path_or_404(database_id)
     return build_prequery_processing_summary(
         database_id,
         tables,
         max_query_tables=max_query_tables,
         target_cluster_count=target_clusters,
         top_n_tables=top_n_tables,
+        db_path=db_path,
     )
 
 
 @app.post("/api/databases/{database_id}/query-summary", response_model=QuerySummaryGraphResponse)
 def get_query_summary_graph(database_id: str, request: QuerySummaryRequest):
-    tables = _load_schema_or_404(database_id)
+    tables, db_path = _load_schema_and_path_or_404(database_id)
 
     try:
         return build_query_summary_graph(
@@ -219,6 +240,7 @@ def get_query_summary_graph(database_id: str, request: QuerySummaryRequest):
             node_budget=request.node_budget,
             include_neighbors=request.include_neighbors,
             max_query_tables=request.max_query_tables,
+            db_path=db_path,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -229,7 +251,7 @@ def get_query_summary_graph(database_id: str, request: QuerySummaryRequest):
 
 @app.post("/api/databases/{database_id}/summary-node/expand", response_model=ClusterExpandResponse)
 def expand_project_summary_node(database_id: str, request: SummaryNodeExpandRequest):
-    tables = _load_schema_or_404(database_id)
+    tables, db_path = _load_schema_and_path_or_404(database_id)
 
     try:
         return expand_summary_node_hierarchical(
@@ -239,6 +261,7 @@ def expand_project_summary_node(database_id: str, request: SummaryNodeExpandRequ
             member_tables=request.tables,
             visible_table_ids=request.visible_table_ids,
             direct_expand_threshold=request.direct_expand_threshold,
+            db_path=db_path,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -249,10 +272,10 @@ def get_focus_graph(
     table: str = Query(..., description="Focus table name"),
     depth: int = Query(1, ge=0, le=3, description="Neighbor depth"),
 ):
-    tables = _load_schema_or_404(database_id)
+    tables, db_path = _load_schema_and_path_or_404(database_id)
 
     try:
-        return build_focus_graph(database_id, tables, table, depth)
+        return build_focus_graph(database_id, tables, table, depth, db_path=db_path)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
@@ -263,10 +286,10 @@ def get_focus_summary_graph(
     table: str = Query(..., description="Focus table name"),
     depth: int = Query(1, ge=0, le=3, description="Neighbor depth"),
 ):
-    tables = _load_schema_or_404(database_id)
+    tables, db_path = _load_schema_and_path_or_404(database_id)
 
     try:
-        return build_focus_summary_graph(database_id, tables, table, depth)
+        return build_focus_summary_graph(database_id, tables, table, depth, db_path=db_path)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
@@ -278,10 +301,10 @@ def get_cluster_expansion(
     table: str = Query(..., description="Focus table name used to create the summary node"),
     depth: int = Query(1, ge=0, le=3, description="Focus depth used to create the summary node"),
 ):
-    tables = _load_schema_or_404(database_id)
+    tables, db_path = _load_schema_and_path_or_404(database_id)
 
     try:
-        return expand_cluster(database_id, tables, table, cluster_id, depth)
+        return expand_cluster(database_id, tables, table, cluster_id, depth, db_path=db_path)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
@@ -311,7 +334,8 @@ def get_table_detail(database_id: str, table_name: str):
     if table is None:
         raise HTTPException(status_code=404, detail=f"Table not found: {table_name}")
 
-    graph = build_schema_graph(database_id, tables)
+    db_path = get_database_path(database_id)
+    graph = build_schema_graph(database_id, tables, db_path=db_path)
     node = next((item for item in graph.nodes if item.id == table_name), None)
     outgoing_edges = [edge for edge in graph.edges if edge.source == table_name]
 

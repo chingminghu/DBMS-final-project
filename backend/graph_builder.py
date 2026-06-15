@@ -781,80 +781,174 @@ def _paper_greedy_modularity_clustering(
     edges: List[GraphEdge],
     tolerance: float = 1e-12,
 ) -> Tuple[List[Set[str]], float, float, List[Dict[str, Any]], Dict[Tuple[str, str], float], Dict[str, float]]:
-    """Complete greedy clustering from the community-detection formulation.
+    """Greedy weighted-modularity clustering with incremental updates.
 
-    Start with every table as its own cluster.  At each iteration, evaluate all
-    cluster pairs connected by at least one weighted edge and merge the pair
-    that maximizes the modularity gain ΔQ.  Stop when no merge can improve Q.
+    This keeps the same paper objective as the previous implementation:
+        Q = Σ_i (e_ii - a_i²)
+    and still greedily merges the cluster pair with the largest positive ΔQ.
+
+    The old version recomputed ΔQ for every cluster pair after every merge,
+    which becomes slow once table count grows.  This version stores only
+    neighboring cluster pairs in a priority queue and updates candidates around
+    the newly merged cluster.  It gives the same greedy decision rule for
+    connected cluster pairs, but avoids repeated all-pair rescans.
     """
-    adjacency_weight, degree, total_edge_strength = _build_paper_community_graph(edges)
-    clusters: List[Set[str]] = [{name} for name in sorted(table_names)]
+    import heapq
+
+    table_names = sorted(table_names)
+    allowed_tables = set(table_names)
+
+    # The clustering routine is sometimes called on a subgraph, for example
+    # when expanding one summary node.  In that case `edges` may still be the
+    # full schema edge list.  The paper modularity computation must be applied
+    # only to the induced subgraph over `table_names`; otherwise endpoints that
+    # are outside the current cluster scope (e.g., an unrelated table such as
+    # teachers) can cause KeyError during name-to-cluster lookup and also distort
+    # the modularity score.
+    scoped_edges = [
+        edge for edge in edges
+        if edge.source in allowed_tables and edge.target in allowed_tables
+    ]
+
+    adjacency_weight, degree, total_edge_strength = _build_paper_community_graph(scoped_edges)
     merge_history: List[Dict[str, Any]] = []
 
-    if len(clusters) <= 1 or total_edge_strength <= 1e-12:
-        return clusters, 0.0, total_edge_strength, merge_history, adjacency_weight, degree
+    if len(table_names) <= 1 or total_edge_strength <= 1e-12:
+        return [{name} for name in table_names], 0.0, total_edge_strength, merge_history, adjacency_weight, degree
 
-    current_q = _weighted_modularity(clusters, adjacency_weight, degree, total_edge_strength)
+    # Cluster id -> member tables.  We use integer cluster ids internally so that
+    # merging does not require reshuffling list indices.
+    clusters: Dict[int, Set[str]] = {idx: {name} for idx, name in enumerate(table_names)}
+    active: Set[int] = set(clusters)
+    version: Dict[int, int] = {idx: 0 for idx in clusters}
+    incident: Dict[int, float] = {idx: degree.get(name, 0.0) for idx, name in enumerate(table_names)}
+    internal: Dict[int, float] = {idx: 0.0 for idx in clusters}
+    neighbors: Dict[int, Dict[int, float]] = defaultdict(dict)
+
+    name_to_cluster = {name: idx for idx, name in enumerate(table_names)}
+    for (u, v), weight in adjacency_weight.items():
+        cu = name_to_cluster[u]
+        cv = name_to_cluster[v]
+        if cu == cv:
+            continue
+        neighbors[cu][cv] = neighbors[cu].get(cv, 0.0) + weight
+        neighbors[cv][cu] = neighbors[cv].get(cu, 0.0) + weight
+
+    def contribution(cid: int) -> float:
+        e_ii = internal.get(cid, 0.0) / total_edge_strength
+        a_i = incident.get(cid, 0.0) / (2.0 * total_edge_strength)
+        return e_ii - (a_i ** 2)
+
+    def merge_delta(left: int, right: int) -> float:
+        between = neighbors.get(left, {}).get(right, 0.0)
+        if between <= 0:
+            return -math.inf
+        merged_internal = internal[left] + internal[right] + between
+        merged_incident = incident[left] + incident[right]
+        merged_e = merged_internal / total_edge_strength
+        merged_a = merged_incident / (2.0 * total_edge_strength)
+        merged_q = merged_e - (merged_a ** 2)
+        return merged_q - contribution(left) - contribution(right)
+
+    heap: List[Tuple[float, float, int, str, int, int, int, int]] = []
+
+    def push_pair(left: int, right: int) -> None:
+        if left == right or left not in active or right not in active:
+            return
+        if right not in neighbors.get(left, {}):
+            return
+        delta = merge_delta(left, right)
+        between = neighbors[left].get(right, 0.0)
+        merged_size = len(clusters[left]) + len(clusters[right])
+        merged_first = sorted(clusters[left] | clusters[right])[0]
+        # Python heapq is min-heap.  Negate scores to pop maximum ΔQ first.
+        heapq.heappush(heap, (-delta, -between, -merged_size, merged_first, left, right, version[left], version[right]))
+
+    for left in list(active):
+        for right in list(neighbors.get(left, {})):
+            if left < right:
+                push_pair(left, right)
+
+    current_q = sum(contribution(cid) for cid in active)
+    next_cluster_id = len(clusters)
     step = 0
 
-    while len(clusters) > 1:
-        best_pair: Optional[Tuple[int, int]] = None
-        best_delta = 0.0
-        best_q_after = current_q
-        best_between_weight = 0.0
+    while heap and len(active) > 1:
+        neg_delta, neg_between, neg_size, merged_first, left, right, left_version, right_version = heapq.heappop(heap)
+        if left not in active or right not in active:
+            continue
+        if version[left] != left_version or version[right] != right_version:
+            continue
+        if right not in neighbors.get(left, {}):
+            continue
 
-        for i in range(len(clusters)):
-            for j in range(i + 1, len(clusters)):
-                between = _cluster_between_weight(clusters[i], clusters[j], adjacency_weight)
-                if between <= 0:
-                    continue
-                before_i = _modularity_contribution(clusters[i], adjacency_weight, degree, total_edge_strength)[0]
-                before_j = _modularity_contribution(clusters[j], adjacency_weight, degree, total_edge_strength)[0]
-                merged = clusters[i] | clusters[j]
-                after = _modularity_contribution(merged, adjacency_weight, degree, total_edge_strength)[0]
-                delta = after - before_i - before_j
-                q_after = current_q + delta
-                tie_breaker = (
-                    delta,
-                    between,
-                    len(merged),
-                    sorted(merged)[0],
-                )
-                current_best_tie = (
-                    best_delta,
-                    best_between_weight,
-                    len(clusters[best_pair[0]] | clusters[best_pair[1]]) if best_pair else -1,
-                    sorted(clusters[best_pair[0]] | clusters[best_pair[1]])[0] if best_pair else "",
-                )
-                if best_pair is None or tie_breaker > current_best_tie:
-                    best_pair = (i, j)
-                    best_delta = delta
-                    best_q_after = q_after
-                    best_between_weight = between
-
-        if best_pair is None or best_delta <= tolerance:
+        delta = merge_delta(left, right)
+        between = neighbors[left].get(right, 0.0)
+        if delta <= tolerance:
+            # Since the heap is ordered by ΔQ and this entry is current, no
+            # remaining current candidate can improve the modularity.
             break
 
-        i, j = best_pair
-        left = clusters[i]
-        right = clusters[j]
-        merged = left | right
+        left_members = clusters[left]
+        right_members = clusters[right]
+        merged_members = left_members | right_members
+        new_id = next_cluster_id
+        next_cluster_id += 1
+
         step += 1
+        current_q += delta
         merge_history.append({
             "step": step,
-            "merged_clusters": [sorted(left), sorted(right)],
-            "new_cluster": sorted(merged),
-            "between_edge_strength": round(best_between_weight, 6),
-            "delta_modularity": round(best_delta, 6),
-            "modularity_after_merge": round(best_q_after, 6),
+            "merged_clusters": [sorted(left_members), sorted(right_members)],
+            "new_cluster": sorted(merged_members),
+            "between_edge_strength": round(between, 6),
+            "delta_modularity": round(delta, 6),
+            "modularity_after_merge": round(current_q, 6),
         })
 
-        clusters = [cluster for idx, cluster in enumerate(clusters) if idx not in {i, j}]
-        clusters.append(merged)
-        current_q = best_q_after
+        # Build new cluster statistics.
+        clusters[new_id] = merged_members
+        internal[new_id] = internal[left] + internal[right] + between
+        incident[new_id] = incident[left] + incident[right]
+        version[new_id] = 0
 
-    clusters.sort(key=lambda group: (-len(group), sorted(group)[0]))
-    return clusters, current_q, total_edge_strength, merge_history, adjacency_weight, degree
+        # Neighbors of merged cluster are the sum of both old boundary weights.
+        new_neighbor_weights: Dict[int, float] = {}
+        for nbr, weight in neighbors.get(left, {}).items():
+            if nbr in active and nbr != right:
+                new_neighbor_weights[nbr] = new_neighbor_weights.get(nbr, 0.0) + weight
+        for nbr, weight in neighbors.get(right, {}).items():
+            if nbr in active and nbr != left:
+                new_neighbor_weights[nbr] = new_neighbor_weights.get(nbr, 0.0) + weight
+
+        # Deactivate old clusters and remove stale neighbor links.
+        active.remove(left)
+        active.remove(right)
+        version[left] += 1
+        version[right] += 1
+        for nbr in list(neighbors.get(left, {})):
+            neighbors[nbr].pop(left, None)
+        for nbr in list(neighbors.get(right, {})):
+            neighbors[nbr].pop(right, None)
+        neighbors.pop(left, None)
+        neighbors.pop(right, None)
+
+        active.add(new_id)
+        neighbors[new_id] = {}
+        for nbr, weight in new_neighbor_weights.items():
+            if nbr not in active or weight <= 0:
+                continue
+            neighbors[new_id][nbr] = weight
+            neighbors[nbr][new_id] = weight
+            push_pair(min(new_id, nbr), max(new_id, nbr))
+
+    final_clusters = [clusters[cid] for cid in active]
+    final_clusters.sort(key=lambda group: (-len(group), sorted(group)[0]))
+    final_q = sum(
+        _modularity_contribution(cluster, adjacency_weight, degree, total_edge_strength)[0]
+        for cluster in final_clusters
+    )
+    return final_clusters, final_q, total_edge_strength, merge_history, adjacency_weight, degree
 
 
 def build_initial_clusters(
@@ -951,15 +1045,16 @@ def build_initial_clusters(
         )
 
     # Pick top-m representatives as the automatic initial query set.
-    # The clustering paper ranks communities by their modularity contribution Q_i;
-    # representative importance is only a tie-breaker inside clusters with similar Q_i.
+    # For user-facing recommendations we rank clusters by the importance score
+    # of their representative tables. Q_i remains reported as the paper
+    # modularity contribution, but it is not used as the primary ranking key.
     ranked_clusters = sorted(
         clusters,
         key=lambda cluster: (
-            cluster.modularity_contribution,
             cluster.representative_score,
+            cluster.average_importance_score,
+            cluster.modularity_contribution,
             cluster.table_count,
-            cluster.internal_edge_score,
             cluster.representative_table,
         ),
         reverse=True,
@@ -974,8 +1069,9 @@ def build_initial_clusters(
     clusters.sort(
         key=lambda cluster: (
             not cluster.query_set_candidate,
-            -cluster.modularity_contribution,
             -cluster.representative_score,
+            -cluster.average_importance_score,
+            -cluster.modularity_contribution,
             cluster.cluster_id,
         )
     )
@@ -1097,6 +1193,11 @@ def build_prequery_processing_summary(
         top_importance_tables=top_importance_tables,
         edge_weight_summary=edge_summary,
         clusters=clustering.clusters,
+        clustering_method=clustering.clustering_method,
+        modularity_score=clustering.modularity_score,
+        total_edge_strength=clustering.total_edge_strength,
+        merge_count=clustering.merge_count,
+        merge_history=clustering.merge_history,
         method_notes=method_notes,
     )
 
@@ -1725,24 +1826,133 @@ def _assign_hidden_tables_to_anchors(
     return dict(anchor_map)
 
 
+def _merge_singleton_anchor_groups(
+    anchor_groups: Dict[str, Set[str]],
+    graph: SchemaGraphResponse,
+) -> Dict[str, Set[str]]:
+    """Merge singleton hidden groups into the nearest non-singleton group.
+
+    This is used only when no bridge/budget anchor exists and hidden tables are
+    assigned to query anchors.  Query anchors must remain visible, so summaries
+    cannot include the query anchor itself.  To avoid one-table summary nodes,
+    singleton hidden groups are reassigned to the nearest existing hidden group.
+    """
+    groups = {anchor: set(tables) for anchor, tables in anchor_groups.items() if tables}
+    if len(groups) <= 1:
+        return groups
+
+    table_ids = {node.id for node in graph.nodes}
+
+    def group_distance(table_id: str, candidate_tables: Set[str]) -> float:
+        best = math.inf
+        for other_id in candidate_tables:
+            if table_id == other_id:
+                continue
+            _, distance = _shortest_weighted_path(table_id, other_id, graph.edges, table_ids)
+            best = min(best, distance)
+        return best
+
+    changed = True
+    while changed:
+        changed = False
+        singleton_items = [(anchor, next(iter(tables))) for anchor, tables in groups.items() if len(tables) == 1]
+        if not singleton_items:
+            break
+
+        for singleton_anchor, singleton_table in singleton_items:
+            if singleton_anchor not in groups or len(groups[singleton_anchor]) != 1:
+                continue
+
+            candidate_anchors = [anchor for anchor in groups if anchor != singleton_anchor]
+            if not candidate_anchors:
+                continue
+
+            best_anchor = min(
+                candidate_anchors,
+                key=lambda anchor: (
+                    group_distance(singleton_table, groups[anchor]),
+                    -len(groups[anchor]),
+                    anchor,
+                ),
+            )
+            groups[best_anchor].add(singleton_table)
+            del groups[singleton_anchor]
+            changed = True
+
+    return groups
+
+
 def _build_anchor_summary_nodes(
     hidden_ids: Set[str],
     visible_ids: Set[str],
     graph: SchemaGraphResponse,
-) -> Tuple[List[GraphNode], Dict[str, Set[str]], Dict[str, str]]:
-    """Build query-summary nodes by assigning hidden tables to visible anchors."""
+    preferred_anchor_ids: Optional[Set[str]] = None,
+) -> Tuple[List[GraphNode], Dict[str, Set[str]], Dict[str, str], Dict[str, str]]:
+    """Build query-summary nodes by merging hidden tables into anchors.
+
+    This follows the project formulation more closely than the previous
+    singleton-context workaround:
+
+    * Every non-selected table is assigned to an anchor.
+    * Preferred anchors are the paper-selected non-query budget/bridge nodes.
+    * If a bridge anchor receives hidden tables, that bridge node is converted
+      into a summary node whose members include the anchor table itself.
+    * Therefore a summary node always represents at least two tables
+      (anchor + one or more assigned hidden tables), and no one-table summary
+      nodes or context-table nodes are generated.
+
+    The returned `anchor_to_summary` map is used to redirect paper metaedges
+    from converted bridge anchors to their summary nodes.
+    """
     node_map = {node.id: node for node in graph.nodes}
-    anchor_groups = _assign_hidden_tables_to_anchors(hidden_ids, visible_ids, graph)
+
+    preferred_anchor_ids = set(preferred_anchor_ids or set()) & set(visible_ids)
+    # Prefer bridge/budget anchors.  If the paper stage selected no non-query
+    # bridge nodes, fall back to query/visible anchors, but do NOT merge those
+    # query anchors into summary nodes.  Query tables must remain explicitly
+    # visible.
+    anchor_candidates = preferred_anchor_ids or set(visible_ids)
+    anchor_groups = _assign_hidden_tables_to_anchors(hidden_ids, anchor_candidates, graph)
+
+    # If we are forced to use query anchors, avoid one-table hidden summaries by
+    # moving singleton hidden groups into the nearest larger hidden group when
+    # possible.  If there is only one hidden table in the whole graph, producing
+    # a one-table summary is unavoidable unless we reintroduce context-table
+    # promotion; in that rare case we keep it as a minimal coverage summary.
+    if not preferred_anchor_ids and len(hidden_ids) > 1:
+        anchor_groups = _merge_singleton_anchor_groups(anchor_groups, graph)
+
     summary_nodes: List[GraphNode] = []
     cluster_map: Dict[str, Set[str]] = {}
     anchor_by_cluster: Dict[str, str] = {}
+    anchor_to_summary: Dict[str, str] = {}
 
-    for index, (anchor_id, tables_for_anchor) in enumerate(
-        sorted(anchor_groups.items(), key=lambda item: (-len(item[1]), item[0])),
-        start=1,
+    summary_index = 1
+    for anchor_id, assigned_hidden in sorted(
+        anchor_groups.items(), key=lambda item: (-len(item[1]), item[0])
     ):
-        cluster_id = f"qsummary_{index}"
-        cluster_tables = sorted(tables_for_anchor)
+        if not assigned_hidden:
+            continue
+
+        # If the anchor is a visible bridge/budget table, merge the anchor into
+        # the summary node.  This prevents singleton hidden summaries and makes
+        # the visual node represent: anchor bridge table + assigned hidden
+        # context.  Query anchors are kept visible; they are only used as a
+        # fallback when there are no bridge anchors.
+        include_anchor = anchor_id in preferred_anchor_ids
+        cluster_tables = set(assigned_hidden)
+        if include_anchor:
+            cluster_tables.add(anchor_id)
+
+        # As a safety guard, never create a one-table summary node.  This can
+        # only happen in the rare fallback case where there are no bridge
+        # anchors and a single hidden table is assigned to a query anchor.
+        if len(cluster_tables) < 2:
+            continue
+
+        cluster_id = f"qsummary_{summary_index}"
+        summary_index += 1
+
         representative = max(
             cluster_tables,
             key=lambda table_name: (
@@ -1753,32 +1963,78 @@ def _build_anchor_summary_nodes(
         )
         representative_score = node_map[representative].importance_score
         average_score = sum(node_map[name].importance_score for name in cluster_tables) / max(len(cluster_tables), 1)
-        guessed_label = _guess_cluster_label(cluster_tables)
-        label = guessed_label if not guessed_label.startswith("Schema group") else f"Context near {anchor_id}"
+        cluster_table_list = sorted(cluster_tables)
+        guessed_label = _guess_cluster_label(cluster_table_list)
+        label = guessed_label if not guessed_label.startswith("Schema group") else f"Summary near {anchor_id}"
 
-        cluster_map[cluster_id] = set(cluster_tables)
+        cluster_map[cluster_id] = set(cluster_table_list)
         anchor_by_cluster[cluster_id] = anchor_id
+        if include_anchor:
+            anchor_to_summary[anchor_id] = cluster_id
+
         summary_nodes.append(
             GraphNode(
                 id=cluster_id,
                 label=label,
                 node_type="summary",
-                table_count=len(cluster_tables),
-                tables=cluster_tables,
+                table_count=len(cluster_table_list),
+                tables=cluster_table_list,
                 description=(
-                    f"Collapsed context assigned to visible anchor '{anchor_id}'. "
-                    f"Representative table: {representative}."
+                    f"Summary node formed by merging visible anchor '{anchor_id}' "
+                    f"with assigned non-selected tables. Representative table: {representative}."
                 ),
                 importance_score=round(representative_score, 4),
                 representative_table=representative,
                 score_breakdown={
                     "representative_score": round(representative_score, 4),
                     "average_member_score": round(average_score, 4),
+                    "anchor_table": anchor_id,
+                    "anchor_included": 1.0 if include_anchor else 0.0,
+                    "assigned_hidden_table_count": float(len(assigned_hidden)),
                 },
             )
         )
 
-    return summary_nodes, cluster_map, anchor_by_cluster
+    return summary_nodes, cluster_map, anchor_by_cluster, anchor_to_summary
+
+
+def _remap_edges_to_summary_anchors(
+    edges: List[GraphEdge],
+    anchor_to_summary: Dict[str, str],
+) -> List[GraphEdge]:
+    """Redirect edges whose bridge endpoints were converted into summaries."""
+    if not anchor_to_summary:
+        return edges
+
+    remapped: List[GraphEdge] = []
+    seen: Set[Tuple[str, str, str]] = set()
+    for edge in edges:
+        new_source = anchor_to_summary.get(edge.source, edge.source)
+        new_target = anchor_to_summary.get(edge.target, edge.target)
+        if new_source == new_target:
+            # The edge is now internal to the summary node.
+            continue
+        edge_id = edge.id
+        if new_source != edge.source or new_target != edge.target:
+            edge_id = f"{edge.id}__remapped_to_summary"
+        key = (new_source, new_target, edge.edge_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        remapped.append(
+            edge.model_copy(update={
+                "id": edge_id,
+                "source": new_source,
+                "target": new_target,
+                "score_breakdown": {
+                    **(edge.score_breakdown or {}),
+                    "remapped_from_source": edge.source,
+                    "remapped_from_target": edge.target,
+                    "remapped_due_to_anchor_summary": 1.0,
+                } if (new_source != edge.source or new_target != edge.target) else edge.score_breakdown,
+            })
+        )
+    return remapped
 
 
 def _build_query_summary_edges(
@@ -2146,12 +2402,31 @@ def build_query_summary_graph(
             node = node.model_copy(update={"node_type": "bridge"})
         nodes.append(node)
 
-    summary_nodes, cluster_map, _anchor_by_cluster = _build_anchor_summary_nodes(hidden_ids, visible_ids, graph)
+    # Hidden tables are merged into selected non-query budget/bridge anchors.
+    # If an anchor receives hidden tables, the anchor is converted into a
+    # summary node containing itself plus the assigned hidden tables.  This means
+    # we no longer create context table nodes and we no longer create singleton
+    # summary nodes.
+    summary_nodes, cluster_map, _anchor_by_cluster, anchor_to_summary = _build_anchor_summary_nodes(
+        hidden_ids,
+        visible_ids,
+        graph,
+        preferred_anchor_ids=bridge_ids,
+    )
+    converted_anchor_ids = set(anchor_to_summary.keys())
+
+    # Remove converted bridge anchors from the ordinary visible table-node list.
+    nodes = [node for node in nodes if node.id not in converted_anchor_ids]
+    effective_visible_ids = set(visible_ids) - converted_anchor_ids
+
+    # Remap paper metaedges whose endpoints were converted into summary nodes.
+    remapped_metaedges = _remap_edges_to_summary_anchors(metaedges, anchor_to_summary)
 
     # The original paper summary graph contains metaedges, not necessarily the
-    # original FK edges.  Our extension adds compressed summary boundary edges.
-    compressed_boundary_edges = _build_compressed_edges(visible_ids, cluster_map, [], graph)
-    edges = metaedges + compressed_boundary_edges
+    # original FK edges.  Our extension adds compressed boundary edges from
+    # remaining visible table nodes to anchor-based summary nodes.
+    compressed_boundary_edges = _build_compressed_edges(effective_visible_ids, cluster_map, [], graph)
+    edges = remapped_metaedges + compressed_boundary_edges
     all_nodes = nodes + summary_nodes
 
     original_node_count = graph.node_count
@@ -2166,7 +2441,9 @@ def build_query_summary_graph(
         "The optimization objective minimizes the total metaedge weight; lower weight means a more informative schema connection.",
         "The UI node budget is interpreted as |Q|+B, where B is the paper's extra budget-node limit.",
         "This prototype solves the paper IP by exact enumeration on small P; when P is large, it prunes candidate budget nodes and then enumerates exactly over the bounded candidate set.",
-        "Project extension: every non-selected table is assigned to the nearest selected visible anchor and represented by an expandable summary node.",
+        "Project extension: every non-selected table is assigned to a selected bridge anchor when possible.",
+        "Project extension: a bridge anchor with assigned non-selected tables is converted into a summary node that contains the anchor plus its assigned tables.",
+        "Project extension: singleton context tables are no longer promoted; this prevents one-table summary nodes and keeps compression semantics consistent.",
         "Project extension: compressed summary edges are shown in addition to paper metaedges so users know where hidden schema regions attach.",
     ]
 
@@ -2174,15 +2451,15 @@ def build_query_summary_graph(
         database_id=database_id,
         query_tables=cleaned_query_tables,
         node_budget=node_budget,
-        actual_visible_table_count=len(visible_ids),
+        actual_visible_table_count=len(effective_visible_ids),
         query_node_count=len(query_set),
         bridge_node_count=len(bridge_ids),
-        context_node_count=len(context_ids),
+        context_node_count=0,
         summary_node_count=len(summary_nodes),
-        hidden_node_count=len(hidden_ids),
-        visible_table_ids=sorted(visible_ids),
-        bridge_table_ids=sorted(bridge_ids),
-        context_table_ids=sorted(context_ids),
+        hidden_node_count=sum(len(tables) for tables in cluster_map.values()),
+        visible_table_ids=sorted(effective_visible_ids),
+        bridge_table_ids=sorted(bridge_ids - converted_anchor_ids),
+        context_table_ids=[],
         nodes=all_nodes,
         edges=edges,
         paths=paths,
@@ -2191,10 +2468,10 @@ def build_query_summary_graph(
             original_edge_count=original_edge_count,
             query_node_count=len(query_set),
             bridge_node_count=len(bridge_ids),
-            context_node_count=len(context_ids),
-            visible_table_count=len(visible_ids),
+            context_node_count=0,
+            visible_table_count=len(effective_visible_ids),
             summary_node_count=len(summary_nodes),
-            hidden_table_count=len(hidden_ids),
+            hidden_table_count=sum(len(tables) for tables in cluster_map.values()),
             compressed_edge_count=compressed_edge_count,
             budget_requested=requested_budget,
             budget_respected=budget_respected,
@@ -2204,7 +2481,7 @@ def build_query_summary_graph(
         method_spec=QuerySummaryMethodSpec(
             edge_weighting="paper-exact MI column-level path distance: wt(R,S)=min sum D(Ci,Cj), D=1-I/H",
             visible_graph_selection="original Summary Graphs IP-style stage: query nodes + budget nodes + order-preserving metaedges over query shortest-path union",
-            hidden_compression="project extension: non-selected tables are assigned to nearest visible anchors and collapsed into expandable summary nodes",
+            hidden_compression="project extension: non-selected tables are assigned to selected bridge anchors; bridge anchors with assigned hidden tables are converted into summary nodes",
         ),
         method_notes=method_notes + [
             f"paper_solver_mode={paper_diagnostics.get('paper_solver_mode')}",
