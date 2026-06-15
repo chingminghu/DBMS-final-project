@@ -951,11 +951,13 @@ def build_initial_clusters(
         )
 
     # Pick top-m representatives as the automatic initial query set.
+    # The clustering paper ranks communities by their modularity contribution Q_i;
+    # representative importance is only a tie-breaker inside clusters with similar Q_i.
     ranked_clusters = sorted(
         clusters,
         key=lambda cluster: (
-            cluster.representative_score,
             cluster.modularity_contribution,
+            cluster.representative_score,
             cluster.table_count,
             cluster.internal_edge_score,
             cluster.representative_table,
@@ -972,8 +974,8 @@ def build_initial_clusters(
     clusters.sort(
         key=lambda cluster: (
             not cluster.query_set_candidate,
-            -cluster.representative_score,
             -cluster.modularity_contribution,
+            -cluster.representative_score,
             cluster.cluster_id,
         )
     )
@@ -1424,6 +1426,117 @@ def expand_cluster(
         edges=edges,
     )
 
+
+def expand_summary_node_hierarchical(
+    database_id: str,
+    tables: List[TableMeta],
+    cluster_id: str,
+    member_tables: List[str],
+    visible_table_ids: List[str],
+    direct_expand_threshold: int = 4,
+    db_path: Optional[Path] = None,
+) -> ClusterExpandResponse:
+    """Expand a project summary node into the next hierarchy level.
+
+    This is used by query-aware summary nodes and later child summary nodes.
+    The clicked summary node already carries its hidden member tables in
+    GraphNode.tables, so this function does not need to reconstruct the original
+    top-level query summary graph.
+
+    Expansion rule:
+      1. show the member table with the highest paper importance as a real node;
+      2. if the remaining members are small, show them directly;
+      3. otherwise, run the paper greedy modularity clustering on the remaining
+         members and convert each multi-table community into a child summary node.
+
+    Original FK edges are shown whenever both endpoints are visible.  FK edges
+    touching still-collapsed child communities are represented as summary edges.
+    """
+    graph = build_schema_graph(database_id, tables, db_path=db_path)
+    node_map = {node.id: node for node in graph.nodes}
+
+    cluster_tables = {table_id for table_id in member_tables if table_id in node_map}
+    if not cluster_tables:
+        raise KeyError(f"Summary node has no valid member tables: {cluster_id}")
+
+    visible_ids = {table_id for table_id in visible_table_ids if table_id in node_map}
+
+    representative = max(
+        cluster_tables,
+        key=lambda table_name: (
+            node_map[table_name].importance_score,
+            node_map[table_name].referenced_by_count,
+            node_map[table_name].row_count or 0,
+            table_name,
+        ),
+    )
+
+    remaining = set(cluster_tables) - {representative}
+    direct_table_ids: Set[str] = {representative}
+    child_cluster_map: Dict[str, Set[str]] = {}
+    child_summary_nodes: List[GraphNode] = []
+
+    if len(remaining) <= max(0, direct_expand_threshold - 1):
+        direct_table_ids.update(remaining)
+    elif remaining:
+        groups, _, _, _, _, _ = _paper_greedy_modularity_clustering(sorted(remaining), graph.edges)
+
+        for index, group in enumerate(groups, start=1):
+            group = set(group)
+            if len(group) <= 1:
+                direct_table_ids.update(group)
+                continue
+
+            child_id = f"{cluster_id}__child_{index}"
+            child_tables = sorted(group)
+            child_representative = max(
+                child_tables,
+                key=lambda table_name: (
+                    node_map[table_name].importance_score,
+                    node_map[table_name].referenced_by_count,
+                    node_map[table_name].row_count or 0,
+                    table_name,
+                ),
+            )
+            child_rep_score = node_map[child_representative].importance_score
+            average_score = sum(node_map[name].importance_score for name in child_tables) / max(len(child_tables), 1)
+            label = _guess_cluster_label(child_tables)
+
+            child_cluster_map[child_id] = set(child_tables)
+            child_summary_nodes.append(
+                GraphNode(
+                    id=child_id,
+                    label=label,
+                    node_type="summary",
+                    table_count=len(child_tables),
+                    tables=child_tables,
+                    description=(
+                        f"Child summary node created by expanding {cluster_id}. "
+                        f"Representative table: {child_representative}."
+                    ),
+                    importance_score=round(child_rep_score, 4),
+                    representative_table=child_representative,
+                    score_breakdown={
+                        "representative_score": round(child_rep_score, 4),
+                        "average_member_score": round(average_score, 4),
+                    },
+                )
+            )
+
+    direct_nodes = [node_map[node_id] for node_id in sorted(direct_table_ids)]
+
+    # Show original FK edges when both endpoints are already visible after this
+    # expansion.  Then add compressed edges from visible nodes to child summaries,
+    # and between child summaries when their hidden members are connected.
+    expanded_visible_ids = visible_ids | direct_table_ids
+    edges = _build_query_summary_edges(expanded_visible_ids, child_cluster_map, graph)
+
+    return ClusterExpandResponse(
+        database_id=database_id,
+        cluster_id=cluster_id,
+        nodes=direct_nodes + child_summary_nodes,
+        edges=edges,
+    )
 
 
 def get_cluster_metadata(

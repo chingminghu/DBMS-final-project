@@ -729,9 +729,95 @@ function App() {
 
   const expandSummaryNode = async (nodeId, nodeData) => {
     if (viewMode === 'query-summary') {
+      if (!databaseInfo || !Array.isArray(nodeData.tables) || nodeData.tables.length === 0) {
+        setClusterDetail(nodeData);
+        markSelectedNode(nodeId);
+        setMessage('這個 summary node 沒有可展開的 table list。');
+        return;
+      }
+
+      pushCurrentGraphState();
       setClusterDetail(nodeData);
       markSelectedNode(nodeId);
-      setMessage('目前顯示 query-aware summary node 的內容；hierarchical expansion 會在下一階段接上。');
+      setMessage(`正在展開 ${nodeData.label}...`);
+
+      try {
+        const visibleTableIds = elements
+          .filter((el) => el.data && ['query', 'bridge', 'table', 'focus'].includes(el.data.node_type))
+          .map((el) => el.data.id);
+
+        const res = await fetch(`${API_BASE}/api/databases/${databaseInfo.database_id}/summary-node/expand`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            cluster_id: nodeId,
+            tables: nodeData.tables,
+            visible_table_ids: visibleTableIds,
+            direct_expand_threshold: 4
+          })
+        });
+
+        if (!res.ok) {
+          const error = await res.json();
+          throw new Error(error.detail || 'Summary node expansion failed');
+        }
+
+        const expansion = await res.json();
+
+        setElements((currentElements) => {
+          const existingIds = new Set(currentElements.map((el) => el.data?.id));
+          const kept = currentElements.filter((el) => {
+            if (!el.data) return true;
+            if (el.data.id === nodeId) return false;
+            if (el.data.source === nodeId || el.data.target === nodeId) return false;
+            return true;
+          });
+
+          const newNodes = expansion.nodes
+            .filter((node) => !existingIds.has(node.id))
+            .map((node) => ({
+              data: {
+                ...node,
+                id: node.id,
+                label: node.label,
+                displayLabel: node.node_type === 'summary'
+                  ? `${node.label}\n${node.table_count || node.tables?.length || 0} tables collapsed`
+                  : node.label
+              }
+            }));
+
+          const keptIdsAfterSummaryRemoval = new Set(kept.map((el) => el.data?.id));
+          const newEdges = expansion.edges
+            .filter((edge) => {
+              if (existingIds.has(edge.id)) return false;
+              const sourceExists = keptIdsAfterSummaryRemoval.has(edge.source) || newNodes.some((n) => n.data.id === edge.source);
+              const targetExists = keptIdsAfterSummaryRemoval.has(edge.target) || newNodes.some((n) => n.data.id === edge.target);
+              return sourceExists && targetExists;
+            })
+            .map((edge) => ({
+              data: {
+                ...edge,
+                id: edge.id,
+                source: edge.source,
+                target: edge.target,
+                label: edge.edge_type === 'summary_edge' || edge.edge_type === 'metaedge'
+                  ? edge.label
+                  : `${edge.from_column} → ${edge.to_column}`,
+                displayLabel: edge.edge_type === 'summary_edge'
+                  ? `${edge.label}\nscore ${Number(edge.score ?? 0).toFixed(2)}`
+                  : edge.edge_type === 'metaedge'
+                    ? `metaedge\nwt ${Number(edge.weight ?? 0).toFixed(2)}`
+                    : `${edge.from_column} → ${edge.to_column}`
+              }
+            }));
+
+          return [...kept, ...newNodes, ...newEdges];
+        });
+
+        setMessage(`已展開 ${nodeData.label}：新增 ${expansion.nodes.length} node(s)。`);
+      } catch (err) {
+        setMessage(`展開 query summary node 失敗：${err.message}`);
+      }
       return;
     }
 
@@ -1024,8 +1110,8 @@ wt ${Number(edge.weight ?? 0).toFixed(2)}`
                   <div className="cluster-meta">
                     Rep: <button onClick={() => focusRecommendedTable(cluster.representative_table)}>{cluster.representative_table}</button>
                     {' · '}{cluster.table_count} tables
-                    {' · '}score {Number(cluster.representative_score ?? 0).toFixed(2)}
                     {' · '}Qᵢ {Number(cluster.modularity_contribution ?? 0).toFixed(3)}
+                    {' · '}rep importance {Number(cluster.representative_score ?? 0).toFixed(2)}
                   </div>
                   <div className="cluster-table-preview">
                     {cluster.tables.slice(0, 5).join(', ')}{cluster.tables.length > 5 ? ', ...' : ''}

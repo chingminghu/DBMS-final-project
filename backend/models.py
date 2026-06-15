@@ -126,6 +126,13 @@ class QuerySummaryRequest(BaseModel):
     max_query_tables: int = 8
 
 
+class SummaryNodeExpandRequest(BaseModel):
+    cluster_id: str
+    tables: List[str]
+    visible_table_ids: List[str] = []
+    direct_expand_threshold: int = 4
+
+
 class QueryPathEdgeItem(BaseModel):
     source: str
     target: str
