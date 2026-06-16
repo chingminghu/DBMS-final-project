@@ -35,7 +35,7 @@ const cyStylesheet = [
       'text-background-opacity': 0.72,
       'text-background-padding': 5,
       'text-background-shape': 'roundrectangle',
-      'min-zoomed-font-size': 9,
+      'min-zoomed-font-size': 0,
       'overlay-opacity': 0
     }
   },
@@ -89,7 +89,8 @@ const cyStylesheet = [
       'font-size': 20,
       'text-max-width': 245,
       'text-background-color': '#fff7ed',
-      'text-background-opacity': 0.9
+      'text-background-opacity': 0.9,
+      'min-zoomed-font-size': 0
     }
   },
   {
@@ -1734,8 +1735,8 @@ wt ${Number(edge.weight ?? 0).toFixed(2)}`
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <h1>SchemaLens</h1>
-        <p className="subtitle">Cytoscape Schema Graph Viewer</p>
+        <h1>QueryNav</h1>
+        <p className="subtitle">Schema Graph Viewer</p>
 
         <label className="upload-box">
           <input type="file" accept=".db,.sqlite,.sqlite3" onChange={handleUpload} disabled={loading} />
