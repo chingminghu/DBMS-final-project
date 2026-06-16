@@ -21,13 +21,21 @@ const cyStylesheet = [
       'border-color': '#64748b',
       label: 'data(displayLabel)',
       color: '#0f172a',
-      'font-size': 18,
-      'font-weight': 800,
+      'font-size': 21,
+      'font-weight': 900,
       'text-wrap': 'wrap',
-      'text-max-width': 190,
+      'text-max-width': 230,
       'text-valign': 'center',
       'text-halign': 'center',
-      'line-height': 1.3,
+      'line-height': 1.25,
+      'text-outline-width': 2,
+      'text-outline-color': '#ffffff',
+      'text-outline-opacity': 0.9,
+      'text-background-color': '#ffffff',
+      'text-background-opacity': 0.72,
+      'text-background-padding': 5,
+      'text-background-shape': 'roundrectangle',
+      'min-zoomed-font-size': 9,
       'overlay-opacity': 0
     }
   },
@@ -47,6 +55,8 @@ const cyStylesheet = [
       'border-color': '#7c3aed',
       'background-color': '#f5f3ff',
       color: '#4c1d95',
+      'font-size': 22,
+      'text-background-opacity': 0.8,
       'shadow-blur': 16,
       'shadow-color': '#7c3aed',
       'shadow-opacity': 0.28,
@@ -60,7 +70,8 @@ const cyStylesheet = [
       'border-width': 4,
       'border-color': '#2563eb',
       'background-color': '#eff6ff',
-      color: '#1e3a8a'
+      color: '#1e3a8a',
+      'text-background-opacity': 0.8
     }
   },
 
@@ -74,18 +85,22 @@ const cyStylesheet = [
       'border-width': 3,
       'border-style': 'dashed',
       'border-color': '#f97316',
-      color: '#7c2d12'
+      color: '#7c2d12',
+      'font-size': 20,
+      'text-max-width': 245,
+      'text-background-color': '#fff7ed',
+      'text-background-opacity': 0.9
     }
   },
   {
     selector: 'node.selected-node',
     style: {
-      'border-width': 4,
-      'border-color': '#f59e0b',
-      'background-color': '#fffbeb',
+      'border-width': 5,
+      'border-color': '#0f766e',
+      'background-color': '#ccfbf1',
       'shadow-blur': 18,
-      'shadow-color': '#f59e0b',
-      'shadow-opacity': 0.35,
+      'shadow-color': '#14b8a6',
+      'shadow-opacity': 0.38,
       'shadow-offset-x': 0,
       'shadow-offset-y': 0
     }
@@ -160,24 +175,11 @@ const cyStylesheet = [
     }
   },
   {
-    selector: 'edge.compressed-metaedge',
-    style: {
-      width: 'mapData(score, 0, 1, 2.4, 5.8)',
-      'line-style': 'dotted',
-      'line-color': '#7c3aed',
-      'target-arrow-color': '#7c3aed',
-      'target-arrow-shape': 'vee',
-      'arrow-scale': 1.9,
-      color: '#4c1d95',
-      'font-weight': 900
-    }
-  },
-  {
-    selector: 'edge:selected, edge.edge-hover',
+    selector: 'edge:selected, edge.edge-hover, edge.inspected-edge',
     style: {
       width: 3.4,
-      'line-color': '#2563eb',
-      'target-arrow-color': '#2563eb',
+      'line-color': '#0f766e',
+      'target-arrow-color': '#0f766e',
       'arrow-scale': 1.8,
       label: 'data(displayLabel)',
       'text-background-color': '#ffffff',
@@ -188,17 +190,93 @@ const cyStylesheet = [
     }
   },
   {
-    selector: 'edge.compressed-metaedge:selected, edge.compressed-metaedge.edge-hover',
+    selector: 'edge[edge_type = "metaedge"]:selected, edge[edge_type = "metaedge"].edge-hover, edge[edge_type = "metaedge"].inspected-edge',
     style: {
-      'line-color': '#7c3aed',
-      'target-arrow-color': '#7c3aed',
-      'target-arrow-shape': 'vee',
+      'line-color': '#0f766e',
+      'target-arrow-color': '#0f766e',
+      'target-arrow-shape': 'triangle',
       label: 'data(displayLabel)',
-      color: '#4c1d95'
+      color: '#0f766e'
     }
   }
 ];
 
+
+
+function splitPathString(pathString) {
+  if (!pathString || typeof pathString !== 'string') return [];
+  return pathString
+    .split(/\s*(?:→|->|=>)\s*/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function extractEdgePath(edge) {
+  if (!edge) return [];
+  if (Array.isArray(edge.path)) return edge.path.filter(Boolean);
+  if (Array.isArray(edge.original_path)) return edge.original_path.filter(Boolean);
+  if (Array.isArray(edge.score_breakdown?.path)) return edge.score_breakdown.path.filter(Boolean);
+  if (typeof edge.score_breakdown?.paper_metaedge_path === 'string') {
+    return splitPathString(edge.score_breakdown.paper_metaedge_path);
+  }
+  if (Array.isArray(edge.hidden_edges) && edge.hidden_edges.length > 0) {
+    return splitPathString(edge.hidden_edges[0]);
+  }
+  return [];
+}
+
+function formatColumnMapping(edge) {
+  if (!edge) return '';
+  if (edge.from_column || edge.to_column) {
+    return `${edge.source}.${edge.from_column || '?'} → ${edge.target}.${edge.to_column || '?'}`;
+  }
+  if (edge.column_mapping) return edge.column_mapping;
+  if (edge.score_breakdown?.column_mapping) return edge.score_breakdown.column_mapping;
+  return '';
+}
+
+function findOriginalEdgeBetween(source, target, graph) {
+  const graphEdges = graph?.edges || [];
+  return graphEdges.find((edge) => edge.source === source && edge.target === target)
+    || graphEdges.find((edge) => edge.source === target && edge.target === source)
+    || null;
+}
+
+function buildPathColumnMappings(path, graph) {
+  if (!Array.isArray(path) || path.length < 2) return [];
+  const mappings = [];
+  for (let i = 0; i < path.length - 1; i += 1) {
+    const source = path[i];
+    const target = path[i + 1];
+    const originalEdge = findOriginalEdgeBetween(source, target, graph);
+    mappings.push({
+      source,
+      target,
+      label: originalEdge
+        ? formatColumnMapping(originalEdge)
+        : `${source} → ${target}`,
+      weight: originalEdge?.weight,
+      score: originalEdge?.score,
+      edge_type: originalEdge?.edge_type || 'fk'
+    });
+  }
+  return mappings;
+}
+
+function enrichEdgeDetail(edge, graph) {
+  const path = extractEdgePath(edge);
+  const columnMapping = formatColumnMapping(edge);
+  const pathColumnMappings = edge?.edge_type === 'metaedge'
+    ? buildPathColumnMappings(path, graph)
+    : [];
+
+  return {
+    ...edge,
+    normalized_path: path,
+    column_mapping: columnMapping,
+    path_column_mappings: pathColumnMappings
+  };
+}
 
 function EdgeMetrics({ edge }) {
   const b = edge?.score_breakdown || {};
@@ -233,6 +311,37 @@ function EdgeMetrics({ edge }) {
   );
 }
 
+
+function getSummaryRepresentativeName(node) {
+  if (!node) return 'Summary';
+  const representative = node.representative_table
+    || node.anchor_table
+    || node.score_breakdown?.anchor_table
+    || node.score_breakdown?.representative_table
+    || node.tables?.[0]
+    || node.member_tables?.[0]
+    || node.label
+    || 'Summary';
+  return String(representative);
+}
+
+function getSummaryTableCount(node) {
+  if (!node) return 0;
+  return Number(
+    node.table_count
+    ?? node.collapsed_count
+    ?? node.tables?.length
+    ?? node.member_tables?.length
+    ?? 0
+  );
+}
+
+function formatSummaryNodeLabel(node) {
+  const representative = getSummaryRepresentativeName(node);
+  const count = getSummaryTableCount(node);
+  return `${representative} Module\n${count} tables`;
+}
+
 const layoutOptions = {
   name: 'dagre',
   rankDir: 'LR',
@@ -248,7 +357,7 @@ const layoutOptions = {
 function graphToElements(nodesInput, edgesInput) {
   const nodes = nodesInput.map((node) => {
     const displayLabel = node.node_type === 'summary'
-      ? `${node.label}\n${node.table_count ?? 0} tables\nClick to expand`
+      ? formatSummaryNodeLabel(node)
       : node.label;
 
     return {
@@ -267,8 +376,9 @@ function graphToElements(nodesInput, edgesInput) {
   });
 
   const edges = edgesInput.map((edge) => {
-    const isCompressedMetaedge = edge.edge_type === 'metaedge'
-      && String(edge.label || '').toLowerCase().includes('over');
+    const path = extractEdgePath(edge);
+    const hopCount = Math.max(path.length - 1, Number(edge.hidden_edge_count || 0));
+    const fkMapping = formatColumnMapping(edge) || `${edge.from_column || '?'} → ${edge.to_column || '?'}`;
 
     return {
       data: {
@@ -276,18 +386,19 @@ function graphToElements(nodesInput, edgesInput) {
         id: edge.id,
         source: edge.source,
         target: edge.target,
+        normalized_path: path,
         label: edge.edge_type === 'summary_edge' || edge.edge_type === 'metaedge'
           ? edge.label
-          : `${edge.from_column} → ${edge.to_column}`,
+          : fkMapping,
         displayLabel: edge.edge_type === 'summary_edge'
           ? `${edge.label}
 score ${Number(edge.score ?? 0).toFixed(2)}`
           : edge.edge_type === 'metaedge'
-            ? `${isCompressedMetaedge ? 'compressed metaedge' : 'metaedge'}
+            ? `metaedge${hopCount > 0 ? ` · ${hopCount} hop(s)` : ''}
 wt ${Number(edge.weight ?? 0).toFixed(2)}`
-            : `${edge.from_column} → ${edge.to_column}`
+            : fkMapping
       },
-      classes: isCompressedMetaedge ? 'compressed-metaedge' : ''
+      classes: ''
     };
   });
 
@@ -299,6 +410,7 @@ function App() {
   const tableDetailCacheRef = useRef(new Map());
   const prefetchingTablesRef = useRef(new Set());
   const skipNextAutoLayoutRef = useRef(false);
+  const selectedNodeIdRef = useRef('');
 
   const [savedDatabases, setSavedDatabases] = useState([]);
   const [savedDatabaseId, setSavedDatabaseId] = useState('');
@@ -306,6 +418,12 @@ function App() {
   const [fullGraph, setFullGraph] = useState(null);
   const [initialClusters, setInitialClusters] = useState(null);
   const [preQueryInfo, setPreQueryInfo] = useState(null);
+  const [preQueryProgress, setPreQueryProgress] = useState({
+    active: false,
+    stage: 'Waiting to start',
+    elapsedSeconds: 0,
+    error: ''
+  });
   const [querySet, setQuerySet] = useState([]);
   const [nodeBudget, setNodeBudget] = useState(12);
   const [querySummaryInfo, setQuerySummaryInfo] = useState(null);
@@ -318,6 +436,7 @@ function App() {
   const [currentFocusTable, setCurrentFocusTable] = useState('');
   const [tableDetail, setTableDetail] = useState(null);
   const [clusterDetail, setClusterDetail] = useState(null);
+  const [edgeDetail, setEdgeDetail] = useState(null);
   const [clusterSummaryLoading, setClusterSummaryLoading] = useState(false);
   const [inspectorLoadingTable, setInspectorLoadingTable] = useState('');
   const [expandingSummaryNodeId, setExpandingSummaryNodeId] = useState('');
@@ -463,6 +582,7 @@ function App() {
     setElements(graphToElements(graphData.nodes, graphData.edges));
     setFocusInfo(null);
     setClusterDetail(null);
+    setEdgeDetail(null);
     setQuerySummaryInfo(null);
     setViewMode('full');
   }, []);
@@ -471,6 +591,7 @@ function App() {
     setFullGraph(null);
     setInitialClusters(null);
     setPreQueryInfo(null);
+    setPreQueryProgress({ active: false, stage: 'Waiting to start', elapsedSeconds: 0, error: '' });
     setQuerySet([]);
     setQuerySummaryInfo(null);
     setFocusInfo(null);
@@ -480,6 +601,7 @@ function App() {
     setCurrentFocusTable('');
     setTableDetail(null);
     setClusterDetail(null);
+    setEdgeDetail(null);
     setInspectorLoadingTable('');
     setExpandingSummaryNodeId('');
     tableDetailCacheRef.current.clear();
@@ -489,9 +611,31 @@ function App() {
   const fetchPreQueryProcessing = useCallback(async (databaseId) => {
     if (!databaseId) return null;
 
+    let cancelled = false;
+    const startedAt = Date.now();
+
+    setPreQueryInfo(null);
+    setPreQueryProgress({
+      active: true,
+      stage: 'Checking backend pre-query cache...',
+      elapsedSeconds: 0,
+      error: ''
+    });
+
+    const elapsedTimer = window.setInterval(() => {
+      if (cancelled) return;
+      setPreQueryProgress((current) => {
+        if (!current.active) return current;
+        return {
+          ...current,
+          elapsedSeconds: Math.max(1, Math.floor((Date.now() - startedAt) / 1000))
+        };
+      });
+    }, 1000);
+
     try {
       const res = await fetch(`${API_BASE}/api/databases/${databaseId}/prequery?max_query_tables=5&top_n_tables=8`);
-      if (!res.ok) return null;
+      if (!res.ok) throw new Error('Pre-query processing failed');
       const data = await res.json();
       setPreQueryInfo(data);
       setInitialClusters({
@@ -503,11 +647,26 @@ function App() {
         recommended_query_set: data.recommended_query_set || [],
         clusters: data.clusters || []
       });
+      setPreQueryProgress({
+        active: false,
+        stage: data.cache_hit ? 'Loaded pre-query result from backend cache' : 'Pre-query result computed and cached',
+        elapsedSeconds: Math.max(0, Math.floor((Date.now() - startedAt) / 1000)),
+        error: ''
+      });
       return data;
     } catch (err) {
       setPreQueryInfo(null);
       setInitialClusters(null);
+      setPreQueryProgress({
+        active: false,
+        stage: 'Pre-query processing failed',
+        elapsedSeconds: Math.max(0, Math.floor((Date.now() - startedAt) / 1000)),
+        error: err?.message || 'Unknown error'
+      });
       return null;
+    } finally {
+      cancelled = true;
+      window.clearInterval(elapsedTimer);
     }
   }, []);
 
@@ -576,6 +735,7 @@ function App() {
         selectedTable,
         tableDetail,
         clusterDetail,
+        edgeDetail,
         querySet,
         querySummaryInfo,
         message
@@ -589,6 +749,7 @@ function App() {
     selectedTable,
     tableDetail,
     clusterDetail,
+    edgeDetail,
     querySet,
     querySummaryInfo,
     message
@@ -609,6 +770,7 @@ function App() {
     setSelectedTable(previous.selectedTable);
     setTableDetail(previous.tableDetail);
     setClusterDetail(previous.clusterDetail);
+    setEdgeDetail(previous.edgeDetail || null);
     setQuerySet(previous.querySet || []);
     setQuerySummaryInfo(previous.querySummaryInfo || null);
     setGraphHistory((history) => history.slice(0, -1));
@@ -691,14 +853,44 @@ function App() {
   }, [elements, rerunLayout]);
 
   const markSelectedNode = useCallback((nodeId) => {
-    const cy = cyRef.current;
-    if (!cy) return;
+    const selectedId = nodeId || '';
+    selectedNodeIdRef.current = selectedId;
 
-    cy.nodes().removeClass('selected-node');
-    const node = cy.getElementById(nodeId);
-    if (node && node.length > 0) {
-      node.addClass('selected-node');
+    const cy = cyRef.current;
+    if (cy) {
+      cy.nodes().removeClass('selected-node');
+      if (selectedId) {
+        const node = cy.getElementById(selectedId);
+        if (node && node.length > 0 && node.data('node_type') !== 'new_marker') {
+          node.addClass('selected-node');
+        }
+      }
     }
+
+    // Cytoscape classes added imperatively can be lost after React updates the
+    // elements array, which happens when clearing a green marker. Keep the
+    // selected state in the element data as well so newly expanded nodes still
+    // show the teal selected color after their marker disappears.
+    skipNextAutoLayoutRef.current = true;
+    setElements((currentElements) => currentElements.map((el) => {
+      if (!el.data || el.data.source || el.data.target || el.data.node_type === 'new_marker') {
+        return el;
+      }
+
+      const baseClasses = String(el.classes || '')
+        .split(/\s+/)
+        .filter((className) => className && className !== 'selected-node')
+        .join(' ');
+
+      if (el.data.id !== selectedId) {
+        return { ...el, classes: baseClasses };
+      }
+
+      return {
+        ...el,
+        classes: `${baseClasses} selected-node`.trim()
+      };
+    }));
   }, []);
 
   const clearNewExpandedMarker = useCallback((nodeId) => {
@@ -839,6 +1031,7 @@ function App() {
 
     setSelectedTable(tableName);
     setClusterDetail(null);
+    setEdgeDetail(null);
 
     const cacheKey = getTableCacheKey(databaseInfo.database_id, tableName);
     const cachedDetail = tableDetailCacheRef.current.get(cacheKey);
@@ -897,8 +1090,9 @@ function App() {
     setElements((currentElements) =>
       currentElements.map((el) => {
         if (!el.data || el.data.id !== nodeId) return el;
+        const nextDataForLabel = { ...el.data, label, llm_summary: summary };
         const displayLabel = el.data.node_type === 'summary'
-          ? `${label}\n${el.data.table_count ?? 0} tables collapsed`
+          ? formatSummaryNodeLabel(nextDataForLabel)
           : label;
         return {
           ...el,
@@ -969,6 +1163,7 @@ function App() {
       setCurrentFocusTable(tableName);
       setViewMode('summary');
       setClusterDetail(null);
+      setEdgeDetail(null);
       setElements(graphToElements(focusData.nodes, focusData.edges));
 
       refreshSummaryNodeLabels(focusData, tableName);
@@ -1020,6 +1215,7 @@ function App() {
       setFocusInfo(null);
       setCurrentFocusTable('');
       setClusterDetail(null);
+      setEdgeDetail(null);
       setViewMode('query-summary');
       setElements(graphToElements(data.nodes, data.edges));
       const budgetStatus = data.stats?.budget_respected === false ? '（query paths 超過 budget，已優先保留連通性）' : '';
@@ -1176,7 +1372,7 @@ function App() {
               id: node.id,
               label: node.label,
               displayLabel: node.node_type === 'summary'
-                ? `${node.label}\n${node.table_count || node.tables?.length || 0} tables collapsed`
+                ? formatSummaryNodeLabel(node)
                 : node.label,
               is_newly_expanded: true
             },
@@ -1292,7 +1488,7 @@ function App() {
             id: node.id,
             label: node.label,
             displayLabel: node.node_type === 'summary'
-              ? `${node.label}\n${node.table_count || node.tables?.length || 0} tables collapsed`
+              ? formatSummaryNodeLabel(node)
               : node.label,
             is_newly_expanded: true
           },
@@ -1335,6 +1531,7 @@ wt ${Number(edge.weight ?? 0).toFixed(2)}`
       setMessage(`已展開 ${nodeData.label}：${expansion.nodes.length} table(s)。`);
       setTableDetail(null);
       setClusterDetail(null);
+      setEdgeDetail(null);
     } catch (err) {
       setMessage(`展開 summary node 失敗：${err.message}`);
     } finally {
@@ -1348,23 +1545,38 @@ wt ${Number(edge.weight ?? 0).toFixed(2)}`
     // CytoscapeComponent may call cy callback again after re-rendering.
     // Remove old handlers first to avoid duplicated tap / hover events.
     cy.off('tap', 'node');
+    cy.off('tap', 'edge');
+    cy.off('tap.clear-selection');
     cy.off('drag', 'node');
     cy.off('mouseover', 'edge');
     cy.off('mouseout', 'edge');
 
     cy.on('tap', 'node', (event) => {
-      const node = event.target;
-      const data = node.data();
+      let node = event.target;
+      let data = node.data();
 
+      // If the user clicks directly on the green marker, treat it as clicking
+      // the marked node. The marker sits above the real node, so returning here
+      // makes the node appear unselectable.
       if (data.node_type === 'new_marker') {
-        return;
+        const targetNode = cy.getElementById(data.target_node_id);
+        if (!targetNode || targetNode.length === 0) return;
+        node = targetNode;
+        data = targetNode.data();
       }
 
-      markSelectedNode(data.id);
+      cy.edges().removeClass('inspected-edge edge-hover');
+      cy.edges().unselect();
+
+      // If the node has the new-expanded green marker, clicking it should still
+      // behave like a normal selection. Clear the marker first, then persist the
+      // selected-node class so the teal selection color survives the element update.
       clearNewExpandedMarker(data.id);
+      markSelectedNode(data.id);
 
       if (data.node_type === 'summary') {
         setTableDetail(null);
+        setEdgeDetail(null);
         setClusterDetail(data);
         setSelectedTable('');
 
@@ -1385,6 +1597,29 @@ wt ${Number(edge.weight ?? 0).toFixed(2)}`
       }
     });
 
+    cy.on('tap', 'edge', (event) => {
+      const edge = event.target;
+      const data = edge.data();
+
+      markSelectedNode('');
+      cy.edges().removeClass('inspected-edge edge-hover');
+      cy.edges().unselect();
+      edge.select();
+      edge.addClass('inspected-edge edge-hover');
+
+      setTableDetail(null);
+      setClusterDetail(null);
+      setSelectedTable('');
+      setEdgeDetail(enrichEdgeDetail(data, fullGraph));
+    });
+
+    cy.on('tap.clear-selection', (event) => {
+      if (event.target !== cy) return;
+      markSelectedNode('');
+      cy.edges().removeClass('inspected-edge edge-hover');
+      cy.edges().unselect();
+    });
+
     cy.on('drag', 'node', (event) => {
       const data = event.target.data();
       if (data.node_type === 'new_marker') return;
@@ -1399,6 +1634,7 @@ wt ${Number(edge.weight ?? 0).toFixed(2)}`
     });
 
     cy.on('mouseout', 'edge', (event) => {
+      if (event.target.hasClass('inspected-edge')) return;
       event.target.removeClass('edge-hover');
       event.target.unselect();
     });
@@ -1410,7 +1646,8 @@ wt ${Number(edge.weight ?? 0).toFixed(2)}`
     updateNodeLabel,
     currentFocusTable,
     selectedTable,
-    viewMode
+    viewMode,
+    fullGraph
   ]);
 
   const focusRecommendedTable = (tableName) => {
@@ -1473,12 +1710,15 @@ wt ${Number(edge.weight ?? 0).toFixed(2)}`
   const closeInspector = useCallback(() => {
     setTableDetail(null);
     setClusterDetail(null);
+    setEdgeDetail(null);
     setInspectorLoadingTable('');
+    markSelectedNode('');
     const cy = cyRef.current;
     if (cy) {
-      cy.nodes().removeClass('selected-node');
+      cy.edges().removeClass('edge-hover inspected-edge');
+      cy.edges().unselect();
     }
-  }, []);
+  }, [markSelectedNode]);
 
   const currentViewLabel = viewMode === 'query-summary'
     ? 'Query-aware Summary Graph'
@@ -1556,12 +1796,13 @@ wt ${Number(edge.weight ?? 0).toFixed(2)}`
               <span className="subtle-pill">Graph semantics</span>
             </div>
             <div className="legend-grid">
+              <span><i className="legend-node table" /> Table</span>
               <span><i className="legend-node query" /> Query table</span>
               <span><i className="legend-node bridge" /> Bridge table</span>
               <span><i className="legend-node summary" /> Summary node</span>
               <span><i className="legend-edge fk" /> Original FK</span>
-              <span><i className="legend-edge meta" /> Metaedge</span>
-              <span><i className="legend-edge compressed" /> Compressed edge</span>
+              <span><i className="legend-edge meta" /> Metaedge / compressed path</span>
+              <span><i className="legend-edge summary" /> Summary edge</span>
             </div>
             <div className="section-note">Edge labels are hidden by default. Hover an edge to inspect its relation and weight.</div>
           </div>
@@ -1624,18 +1865,38 @@ wt ${Number(edge.weight ?? 0).toFixed(2)}`
               </button>
             </div>
 
-            <label className="field-label compact-field-label">Node budget</label>
-            <select
-              className="select"
-              value={nodeBudget}
-              onChange={(event) => setNodeBudget(Number(event.target.value))}
-              disabled={loading}
-            >
-              <option value={8}>8 visible table nodes</option>
-              <option value={12}>12 visible table nodes</option>
-              <option value={16}>16 visible table nodes</option>
-              <option value={20}>20 visible table nodes</option>
-            </select>
+            <div className="budget-control-header">
+              <label className="field-label compact-field-label">Node budget</label>
+              <span className="budget-value">{nodeBudget} visible table nodes</span>
+            </div>
+            <div className="budget-control">
+              <input
+                className="budget-slider"
+                type="range"
+                min="2"
+                max="80"
+                step="1"
+                value={nodeBudget}
+                onChange={(event) => setNodeBudget(Number(event.target.value))}
+                disabled={loading}
+              />
+              <input
+                className="budget-number-input"
+                type="number"
+                min="2"
+                max="200"
+                value={nodeBudget}
+                onChange={(event) => {
+                  const nextValue = Number(event.target.value);
+                  if (Number.isNaN(nextValue)) return;
+                  setNodeBudget(Math.max(2, Math.min(200, nextValue)));
+                }}
+                disabled={loading}
+              />
+            </div>
+            <div className="budget-hint">
+              可輸入 2–200；預設 slider 到 80，方便測試更大的 summary graph budget。
+            </div>
 
             <button
               className="primary-action-button"
@@ -1647,10 +1908,35 @@ wt ${Number(edge.weight ?? 0).toFixed(2)}`
           </div>
         )}
 
+        {preQueryProgress.active && (
+          <div className="cluster-overview-card preprocessing-progress-card">
+            <div className="card-heading-row">
+              <strong>Pre-query Processing</strong>
+              <span className="status-pill working">Running</span>
+            </div>
+            <div className="prequery-cache-status">
+              <span className="loading-dot" />
+              <span>{preQueryProgress.stage}</span>
+              {preQueryProgress.elapsedSeconds > 0 && (
+                <span className="progress-elapsed">{preQueryProgress.elapsedSeconds}s</span>
+              )}
+            </div>
+            <div className="progress-note">
+              Pre-query results are now stored in the backend cache. If the same database and parameters were processed before,
+              this step should return quickly from cache; otherwise the backend will compute it once and save the result.
+            </div>
+          </div>
+        )}
+
         {preQueryInfo && (
           <div className="cluster-overview-card collapsible-card">
             <div className="card-heading-row">
               <strong>Pre-query Processing</strong>
+              {preQueryInfo.cache_hit ? (
+                <span className="status-pill cached">Loaded from cache</span>
+              ) : (
+                <span className="status-pill computed">Computed + cached</span>
+              )}
               <button
                 className="text-button"
                 onClick={() => setShowPreQueryDetails((value) => !value)}
@@ -1805,13 +2091,6 @@ wt ${Number(edge.weight ?? 0).toFixed(2)}`
             <div>Node reduction: {(Number(querySummaryInfo.stats?.node_reduction_ratio ?? 0) * 100).toFixed(1)}%</div>
             <div>Edge reduction: {(Number(querySummaryInfo.stats?.edge_reduction_ratio ?? 0) * 100).toFixed(1)}%</div>
 
-            {querySummaryInfo.method_spec && (
-              <div className="method-box">
-                <strong>Method</strong>
-                <div>{querySummaryInfo.method_spec.visible_graph_selection}</div>
-                <div>{querySummaryInfo.method_spec.hidden_compression}</div>
-              </div>
-            )}
 
             {(querySummaryInfo.paths || []).length > 0 && (
               <>
@@ -1978,12 +2257,12 @@ wt ${Number(edge.weight ?? 0).toFixed(2)}`
           </button>
         </div>
 
-        {(tableDetail || clusterDetail) && (
-          <aside className={clusterDetail ? 'node-inspector summary-inspector' : 'node-inspector'}>
+        {(tableDetail || clusterDetail || edgeDetail) && (
+          <aside className={clusterDetail ? 'node-inspector summary-inspector' : edgeDetail ? 'node-inspector edge-inspector' : 'node-inspector'}>
             <div className="inspector-header">
               <div>
-                <div className="inspector-eyebrow">{clusterDetail ? 'Summary node' : 'Table node'}</div>
-                <h2>{clusterDetail?.llm_summary?.module_name_zh || clusterDetail?.label || tableDetail?.table?.name}</h2>
+                <div className="inspector-eyebrow">{clusterDetail ? 'Summary node' : edgeDetail ? 'Edge' : 'Table node'}</div>
+                <h2>{clusterDetail?.llm_summary?.module_name_zh || clusterDetail?.label || tableDetail?.table?.name || edgeDetail?.label || edgeDetail?.id}</h2>
               </div>
               <button className="inspector-close" onClick={closeInspector} title="Close inspector">×</button>
             </div>
@@ -2050,6 +2329,78 @@ wt ${Number(edge.weight ?? 0).toFixed(2)}`
                     {edge.source}.{edge.from_column} → {edge.target}.{edge.to_column}
                   </div>
                 ))}
+              </div>
+            )}
+
+            {edgeDetail && (
+              <div className="inspector-body">
+                <div className="inspector-stat-row">
+                  <span>Type</span>
+                  <strong>{edgeDetail.edge_type === 'metaedge' ? 'Metaedge / compressed path' : edgeDetail.edge_type === 'summary_edge' ? 'Summary edge' : 'Original FK'}</strong>
+                </div>
+                <div className="inspector-stat-row">
+                  <span>Source</span>
+                  <strong>{edgeDetail.source}</strong>
+                </div>
+                <div className="inspector-stat-row">
+                  <span>Target</span>
+                  <strong>{edgeDetail.target}</strong>
+                </div>
+                {edgeDetail.column_mapping && (
+                  <div className="inspector-stat-row">
+                    <span>Column mapping</span>
+                    <strong>{edgeDetail.column_mapping}</strong>
+                  </div>
+                )}
+                <div className="inspector-stat-row">
+                  <span>Weight</span>
+                  <strong>{Number(edgeDetail.weight ?? 0).toFixed(3)}</strong>
+                </div>
+                <div className="inspector-stat-row">
+                  <span>Score</span>
+                  <strong>{Number(edgeDetail.score ?? 0).toFixed(3)}</strong>
+                </div>
+
+                {edgeDetail.edge_type === 'metaedge' && (
+                  <p className="inspector-description edge-description">
+                    This metaedge represents a compressed join path between two visible nodes. It may summarize one or more hidden intermediate tables from the original schema graph.
+                  </p>
+                )}
+                {edgeDetail.edge_type === 'summary_edge' && (
+                  <p className="inspector-description edge-description">
+                    This summary edge connects a visible node to a summary node. It indicates that at least one table inside the summary node is related to the visible graph.
+                  </p>
+                )}
+                {(!edgeDetail.edge_type || edgeDetail.edge_type === 'fk') && (
+                  <p className="inspector-description edge-description">
+                    This is an original foreign-key relationship extracted from the SQLite schema.
+                  </p>
+                )}
+
+                {edgeDetail.normalized_path?.length > 0 && (
+                  <>
+                    <h3>Complete metaedge path</h3>
+                    <div className="inspector-edge-path">
+                      {edgeDetail.normalized_path.join(' → ')}
+                    </div>
+                  </>
+                )}
+
+                {edgeDetail.path_column_mappings?.length > 0 && (
+                  <>
+                    <h3>Path column mappings</h3>
+                    <div className="inspector-path-mapping-list">
+                      {edgeDetail.path_column_mappings.map((item, index) => (
+                        <div key={`${item.source}-${item.target}-${index}`} className="inspector-edge-item">
+                          {item.label}
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+
+                <h3>Edge metrics</h3>
+                <EdgeMetrics edge={edgeDetail} />
               </div>
             )}
 

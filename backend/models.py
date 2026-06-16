@@ -276,6 +276,12 @@ class PreQueryProcessingResponse(BaseModel):
     merge_count: int = 0
     merge_history: List[Dict[str, Any]] = []
     method_notes: List[str] = []
+    # Backend cache metadata. Pre-query computation can be slow, so the API
+    # stores computed results and returns them directly on matching requests.
+    cache_hit: bool = False
+    cache_key: Optional[str] = None
+    cached_at: Optional[str] = None
+    computed_at: Optional[str] = None
 
 class ClusterSummaryResponse(BaseModel):
     database_id: str

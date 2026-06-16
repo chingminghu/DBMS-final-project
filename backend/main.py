@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 import shutil
@@ -41,6 +42,8 @@ from .storage import (
     SCHEMA_CACHE,
     UPLOAD_DIR,
     get_database_path,
+    get_prequery_cache_result,
+    save_prequery_cache_result,
     list_registered_database_ids,
     load_registered_databases,
     register_database_file,
@@ -117,6 +120,12 @@ def _schema_response(database_id: str, tables):
         foreign_key_count=foreign_key_count,
         tables=tables,
     )
+
+
+def _model_to_dict(model):
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    return model.dict()
 
 
 @app.get("/api/databases", response_model=DatabaseListResponse)
@@ -216,9 +225,21 @@ def get_prequery_processing_summary(
     max_query_tables: int = Query(5, ge=1, le=10, description="Maximum representative tables recommended as initial query set"),
     target_clusters: int | None = Query(None, ge=1, le=20, description="Optional target number of initial clusters"),
     top_n_tables: int = Query(8, ge=1, le=20, description="Number of top importance tables to return"),
+    force_refresh: bool = Query(False, description="Recompute pre-query processing and overwrite the backend cache"),
 ):
     tables, db_path = _load_schema_and_path_or_404(database_id)
-    return build_prequery_processing_summary(
+    cache_params = {
+        "max_query_tables": max_query_tables,
+        "target_clusters": target_clusters,
+        "top_n_tables": top_n_tables,
+    }
+
+    if not force_refresh:
+        cached = get_prequery_cache_result(database_id, cache_params, db_path)
+        if cached is not None:
+            return PreQueryProcessingResponse(**cached)
+
+    result = build_prequery_processing_summary(
         database_id,
         tables,
         max_query_tables=max_query_tables,
@@ -226,6 +247,11 @@ def get_prequery_processing_summary(
         top_n_tables=top_n_tables,
         db_path=db_path,
     )
+    result_data = _model_to_dict(result)
+    result_data["cache_hit"] = False
+    result_data["computed_at"] = datetime.now(timezone.utc).isoformat()
+    cached_result = save_prequery_cache_result(database_id, cache_params, db_path, result_data)
+    return PreQueryProcessingResponse(**cached_result)
 
 
 @app.post("/api/databases/{database_id}/query-summary", response_model=QuerySummaryGraphResponse)
